@@ -144,3 +144,30 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[NOMYX] ✅ v3 System LIVE on port ${PORT}`);
   console.log(`[NOMYX] All modules loaded. Ready to run your business!`);
 });
+
+// ── GMAIL ROUTES ───────────────────────────────────────────────────────────
+const gmailMonitor = load('./modules/gmail-monitor');
+
+app.get('/auth/gmail', (req, res) => {
+  try {
+    const url = gmailMonitor.getAuthUrl?.();
+    if (!url) return res.json({ error: 'Gmail module not loaded' });
+    res.json({ authUrl: url, instructions: 'Open this URL in your browser to connect Gmail', step: 'Visit the authUrl, sign in, click Allow' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/auth/gmail/callback', async (req, res) => {
+  try {
+    const { code } = req.query;
+    const tokens = await gmailMonitor.handleCallback?.(code);
+    res.json({
+      success: true,
+      message: '✅ Gmail connected! Add this REFRESH TOKEN to Railway variables as GMAIL_REFRESH_TOKEN',
+      refreshToken: tokens?.refresh_token,
+      nextStep: 'Copy the refreshToken above → Railway → Variables → Add GMAIL_REFRESH_TOKEN'
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/emails/pending', gmailMonitor.getPending || ((req,res) => res.json({ message: 'Email module loading' })));
+app.post('/emails/approve/:id', gmailMonitor.approveReply || ((req,res) => res.json({ error: 'not loaded' })));
