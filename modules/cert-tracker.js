@@ -32,3 +32,30 @@ async function weeklyReminder() {
 }
 
 module.exports = { getStatus, weeklyReminder };
+
+// ── SCHEDULED REMINDERS ────────────────────────────────────────────────────
+const REMINDERS = [
+  {
+    id: 'pa-puc-reminder',
+    title: 'PA PUC Motor Carrier Authority',
+    message: 'Stella — time to start your PA PUC application. You need this to legally operate as a carrier in Pennsylvania. Go to puc.pa.gov → Motor Carrier Services → Apply for Authority. Cost: ~$300, takes 4-6 weeks. Do this TODAY.',
+    dueDate: '2026-05-27T17:00:00',
+    url: 'https://www.puc.pa.gov',
+    urgency: 'HIGH'
+  },
+  {
+    id: 'session-resume',
+    title: 'Resume NOMYX AI Setup Session',
+    message: 'Stella — time to resume your NOMYX AI system setup. Agenda: 1) Connect Gmail inbox 2) Camden bid submission 3) Social media connections. System is live at nomyx-ai-system-production.up.railway.app',
+    dueDate: '2026-05-26T17:00:00',
+    urgency: 'HIGH'
+  }
+];
+
+function getReminders(req, res) {
+  if (res) return res.json({ reminders: REMINDERS });
+  return REMINDERS;
+}
+
+module.exports.getReminders = getReminders;
+module.exports.REMINDERS = REMINDERS;
