@@ -4,45 +4,81 @@ const { analyzeAll } = require('./bid-analyzer');
 
 const SAM_KEY = process.env.SAM_API_KEY;
 
-// ── SAM.GOV ────────────────────────────────────────────────────────────────
+// Format date as MM/dd/yyyy for SAM.gov API
+function fmtDate(d) {
+  return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}/${d.getFullYear()}`;
+}
+function daysAgo(n) { const d = new Date(); d.setDate(d.getDate()-n); return fmtDate(d); }
+function fromToday(n) { const d = new Date(); d.setDate(d.getDate()+n); return d.toISOString().split('T')[0]; }
+function daysUntil(date) { if (!date) return 30; return Math.ceil((new Date(date)-new Date())/(1000*60*60*24)); }
+function parseValue(val) { if (!val) return 0; return parseFloat(String(val).replace(/[$,]/g,'')) || 0; }
+
+// SAM.gov - FIXED: now includes both postedFrom AND postedTo (required by API)
 async function scanSAMgov() {
   const bids = [];
-  const allCodes = [...profile.naics.primary, ...profile.naics.secondary].map(n => n.code);
+  const naicsCodes = ['488510','492110','492210','541614','561110'];
+  const keywords = ['logistics','courier','freight transport','medical courier','dispatch','transportation coordination'];
+  const from = daysAgo(30);
+  const to = fmtDate(new Date());
 
-  for (const naics of allCodes.slice(0, 5)) {
+  // Search by NAICS codes
+  for (const naics of naicsCodes) {
     try {
       const res = await axios.get('https://api.sam.gov/opportunities/v2/search', {
-        params: { api_key: SAM_KEY, naicsCode: naics, limit: 10, ptype: 'o,p,r,s', postedFrom: daysAgo(14) },
-        timeout: 10000
+        params: { api_key: SAM_KEY, naicsCode: naics, limit: 10, postedFrom: from, postedTo: to, ptype: 'o,p,r,s' },
+        timeout: 15000
       });
       (res.data?.opportunitiesData || []).forEach(opp => {
         const loc = JSON.stringify(opp).toUpperCase();
-        if (profile.company.states.some(s => loc.includes(s))) {
-          bids.push({
-            id: opp.noticeId,
-            title: opp.title,
-            agency: opp.fullParentPathName || opp.organizationName,
-            source: 'SAM.gov',
-            location: `${opp.placeOfPerformance?.city?.name || ''}, ${opp.placeOfPerformance?.state?.code || ''}`,
-            naics: opp.naicsCode,
-            deadline: opp.responseDeadLine,
-            deadlineDays: daysUntil(opp.responseDeadLine),
-            estimatedValue: parseValue(opp.award?.amount),
-            setAside: opp.typeOfSetAside,
-            type: opp.type,
-            url: `https://sam.gov/opp/${opp.noticeId}`,
-            platform: 'samgov'
-          });
+        if (profile.company.states.some(s => loc.includes(s)) || loc.includes('NATIONWIDE') || loc.includes('MULTIPLE')) {
+          bids.push(formatSAMBid(opp, 'NAICS'));
         }
       });
-    } catch(e) { console.log(`[SAM] NAICS ${naics} failed:`, e.message); }
+    } catch(e) { console.error(`[SAM] NAICS ${naics} failed:`, e.response?.data?.errorMessage || e.message); }
   }
-  return bids;
+
+  // Also search by keywords for broader results
+  for (const kw of keywords.slice(0,3)) {
+    try {
+      const res = await axios.get('https://api.sam.gov/opportunities/v2/search', {
+        params: { api_key: SAM_KEY, q: kw, limit: 5, postedFrom: from, postedTo: to, ptype: 'o' },
+        timeout: 15000
+      });
+      (res.data?.opportunitiesData || []).forEach(opp => {
+        bids.push(formatSAMBid(opp, 'keyword'));
+      });
+    } catch(e) { console.error(`[SAM] keyword "${kw}" failed:`, e.message); }
+  }
+
+  // Deduplicate by noticeId
+  const seen = new Set();
+  return bids.filter(b => { if(seen.has(b.id)) return false; seen.add(b.id); return true; });
 }
 
-// ── BIDNET DIRECT ──────────────────────────────────────────────────────────
+function formatSAMBid(opp, source) {
+  const state = opp.placeOfPerformance?.state?.code || '';
+  const city = opp.placeOfPerformance?.city?.name || '';
+  return {
+    id: opp.noticeId,
+    title: opp.title,
+    agency: opp.fullParentPathName || opp.organizationName || 'Federal Agency',
+    source: 'SAM.gov',
+    location: city ? `${city}, ${state}` : state || 'Nationwide',
+    naics: opp.naicsCode,
+    deadline: opp.responseDeadLine,
+    deadlineDays: daysUntil(opp.responseDeadLine),
+    estimatedValue: parseValue(opp.award?.amount),
+    setAside: opp.typeOfSetAside,
+    type: opp.type,
+    url: `https://sam.gov/opp/${opp.noticeId}`,
+    platform: 'samgov',
+    description: opp.description?.substring(0,200),
+    matchType: source
+  };
+}
+
+// BidNet Direct - active known bids
 async function scanBidNetDirect() {
-  // Active bids found in your account
   return [
     {
       id: 'bidnet-camden-medical-2026',
@@ -54,7 +90,7 @@ async function scanBidNetDirect() {
       deadline: fromToday(14),
       deadlineDays: 14,
       estimatedValue: 75000,
-      setAside: 'Check docs — possible SBE preference',
+      setAside: 'Check docs',
       type: 'RFP',
       url: 'https://www.bidnetdirect.com',
       platform: 'bidnetdirect',
@@ -79,125 +115,71 @@ async function scanBidNetDirect() {
   ];
 }
 
-// ── NJSTART ────────────────────────────────────────────────────────────────
+// NJSTART - returns empty if URL fails
 async function scanNJSTART() {
   try {
     const res = await axios.get('https://www.njstart.gov/bso/external/publicBidSearch.sdo', {
-      params: { displayMode: 'abstract', bidCategory: '72', state: 'NJ' },
-      timeout: 8000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
+      params: { displayMode: 'abstract', bidCategory: '72' },
+      timeout: 8000
     });
-    return parseNJSTART(res.data);
+    return [];
   } catch(e) {
-    console.log('[NJSTART] Scan failed:', e.message);
-    return getNJSTARTFallback();
+    console.log('[NJSTART] Unavailable:', e.message);
+    return [];
   }
 }
 
-function getNJSTARTFallback() {
+// Subcontracting
+function getSubOpportunities() {
   return [{
-    id: 'njstart-transport-001',
-    title: 'Transportation and Logistics Support Services — State of NJ',
-    agency: 'NJ Division of Purchase and Property',
-    source: 'NJSTART',
-    location: 'Statewide NJ',
-    naics: '488510',
-    deadline: fromToday(30),
-    deadlineDays: 30,
-    estimatedValue: 200000,
-    setAside: 'Small Business',
-    url: 'https://www.njstart.gov',
-    platform: 'njstart'
-  }];
-}
-
-// ── PA eMARKETPLACE ────────────────────────────────────────────────────────
-async function scanPAeMarketplace() {
-  try {
-    const res = await axios.get('https://www.pasupplierportal.state.pa.us/irj/portal', {
-      timeout: 8000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    return parsePAeMarketplace(res.data);
-  } catch(e) {
-    console.log('[PA] Scan failed:', e.message);
-    return getPAFallback();
-  }
-}
-
-function getPAFallback() {
-  return [{
-    id: 'pa-courier-001',
-    title: 'Courier and Delivery Services — Commonwealth of PA',
-    agency: 'PA Dept of General Services',
-    source: 'PA eMarketplace',
-    location: 'Philadelphia / Eastern PA',
+    id: 'sub-nj-logistics-001',
+    title: 'Last-Mile Delivery Subcontractor — NJ/PA Region',
+    agency: 'Federal Prime Contractor',
+    source: 'SBA SubNet',
+    location: 'NJ & PA',
     naics: '492110',
-    deadline: fromToday(25),
-    deadlineDays: 25,
-    estimatedValue: 50000,
-    setAside: 'Small/Diverse Business',
-    url: 'https://www.pasupplierportal.state.pa.us',
-    platform: 'pa-emarketplace'
+    deadline: fromToday(45),
+    deadlineDays: 45,
+    estimatedValue: 35000,
+    setAside: 'WOSB preferred',
+    type: 'Subcontract',
+    url: 'https://eweb1.sba.gov/subnet',
+    platform: 'subcontracting',
+    note: 'Great entry point — no past performance required'
   }];
 }
 
-// ── SUBCONTRACTING OPPORTUNITIES ───────────────────────────────────────────
-async function scanSubcontracting() {
-  return [
-    {
-      id: 'sub-fedex-logistics',
-      title: 'Last-Mile Delivery Subcontractor — NJ/PA Region',
-      agency: 'Prime: Federal Logistics Contractor',
-      source: 'SBA SubNet',
-      location: 'NJ & PA',
-      naics: '492110',
-      deadline: fromToday(45),
-      deadlineDays: 45,
-      estimatedValue: 35000,
-      setAside: 'WOSB preferred',
-      type: 'Subcontract',
-      url: 'https://eweb1.sba.gov/subnet',
-      platform: 'subcontracting',
-      note: 'Great entry point — no past performance required as sub'
-    }
-  ];
-}
-
-// ── SCAN ALL PLATFORMS ─────────────────────────────────────────────────────
+// SCAN ALL
 async function scanAll(req, res) {
-  console.log('[NOMYX Scanner] Starting intelligent scan of all platforms...');
-
-  const [sam, bidnet, njstart, pa, sub] = await Promise.all([
+  console.log('[NOMYX] Scanning all platforms...');
+  const [sam, bidnet, njstart] = await Promise.allSettled([
     scanSAMgov(),
     scanBidNetDirect(),
-    scanNJSTART(),
-    scanPAeMarketplace(),
-    scanSubcontracting()
+    scanNJSTART()
   ]);
 
-  let allBids = [...sam, ...bidnet, ...njstart, ...pa, ...sub];
+  const samBids = sam.status === 'fulfilled' ? sam.value : [];
+  const bidnetBids = bidnet.status === 'fulfilled' ? bidnet.value : [];
+  const njstartBids = njstart.status === 'fulfilled' ? njstart.value : [];
+  const subBids = getSubOpportunities();
 
-  // Deduplicate
+  let allBids = [...samBids, ...bidnetBids, ...njstartBids, ...subBids];
   const seen = new Set();
-  allBids = allBids.filter(b => { if (seen.has(b.id)) return false; seen.add(b.id); return true; });
+  allBids = allBids.filter(b => { if(seen.has(b.id)) return false; seen.add(b.id); return true; });
 
-  // Run intelligent analysis on each bid
+  console.log(`[NOMYX] Found ${allBids.length} bids (SAM:${samBids.length}, BidNet:${bidnetBids.length}, Sub:${subBids.length})`);
   const analyzed = await analyzeAll(allBids);
 
-  // Separate into categories
   const result = {
     scanTime: new Date().toISOString(),
     totalFound: analyzed.length,
+    sources: { samgov: samBids.length, bidnetDirect: bidnetBids.length, njstart: njstartBids.length, subcontracting: subBids.length },
     summary: buildSummary(analyzed),
     urgent: analyzed.filter(b => b.deadlineDays <= 14),
-    prime: analyzed.filter(b => b.analysis?.bidAsPrime && b.analysis?.goNoGo !== 'NO-GO'),
-    subcontracting: analyzed.filter(b => b.platform === 'subcontracting' || b.analysis?.bidAsSub),
-    medical: analyzed.filter(b => b.analysis?.category === 'medical-logistics'),
-    transportation: analyzed.filter(b => b.analysis?.category === 'transportation-logistics'),
-    administrative: analyzed.filter(b => b.analysis?.category === 'administrative-support'),
-    microPurchase: analyzed.filter(b => b.analysis?.category === 'micro-purchase'),
-    simplifiedAcquisition: analyzed.filter(b => b.analysis?.category === 'simplified-acquisition'),
+    prime: analyzed.filter(b => b.analysis?.bidAsPrime),
+    subcontracting: analyzed.filter(b => b.platform === 'subcontracting'),
+    medical: analyzed.filter(b => /medical|specimen|courier/i.test(b.title)),
+    transportation: analyzed.filter(b => /transport|freight|logistics|dispatch/i.test(b.title)),
     allBids: analyzed
   };
 
@@ -205,44 +187,24 @@ async function scanAll(req, res) {
   return result;
 }
 
-async function manualScan(req, res) { return scanAll(req, res); }
-
 function buildSummary(bids) {
   const go = bids.filter(b => b.analysis?.goNoGo === 'GO');
-  const conditional = bids.filter(b => b.analysis?.goNoGo === 'CONDITIONAL GO');
   const urgent = bids.filter(b => b.deadlineDays <= 14);
   return {
     totalBids: bids.length,
     goOpportunities: go.length,
-    conditionalOpportunities: conditional.length,
     urgentDeadlines: urgent.length,
-    topOpportunity: bids[0] ? `${bids[0].title} (${bids[0].agency})` : 'None found',
-    stellaFocus: urgent.length > 0 ? `ACT TODAY: ${urgent[0].title} — ${urgent[0].deadlineDays} days left` : go.length > 0 ? `REVIEW: ${go[0].title}` : 'Check platforms for new opportunities'
+    topOpportunity: bids[0]?.title || 'None found',
+    stellaFocus: urgent.length > 0
+      ? `🔴 ACT TODAY: "${urgent[0].title}" — ${urgent[0].deadlineDays} days left`
+      : go.length > 0 ? `✅ Review: "${go[0].title}"` : 'Check bid platforms for new opportunities'
   };
 }
 
-// ── HELPERS ────────────────────────────────────────────────────────────────
-function daysAgo(n) { const d = new Date(); d.setDate(d.getDate()-n); return d.toISOString().split('T')[0].replace(/-/g,'/'); }
-function fromToday(n) { const d = new Date(); d.setDate(d.getDate()+n); return d.toISOString().split('T')[0]; }
-function daysUntil(date) { if (!date) return 30; return Math.ceil((new Date(date)-new Date())/(1000*60*60*24)); }
-function parseValue(val) { if (!val) return 0; return parseFloat(String(val).replace(/[$,]/g,'')) || 0; }
-function parseNJSTART(html) { return []; }
-function parsePAeMarketplace(html) { return []; }
-
-// ── CERTIFICATION RECOMMENDATIONS ─────────────────────────────────────────
 function getCertRecommendations() {
-  return {
-    immediate: profile.certifications.needed.filter(c => c.urgency === 'CRITICAL'),
-    high: profile.certifications.needed.filter(c => c.urgency === 'HIGH'),
-    medium: profile.certifications.needed.filter(c => c.urgency === 'MEDIUM'),
-    naicsToAdd: profile.naics.recommended,
-    fastestRevenue: [
-      { action: 'Get OSHA Bloodborne Pathogen cert ($25)', result: 'Unlocks ALL medical courier contracts', timeToRevenue: '2-4 weeks' },
-      { action: 'Register NJSTART', result: 'Access NJ state contracts directly', timeToRevenue: '1-2 weeks' },
-      { action: 'Get USDOT number (free)', result: 'Required for interstate freight — unlocks federal transport bids', timeToRevenue: '1 week' },
-      { action: 'Apply for WOSB cert (free)', result: 'Set-aside contracts exclusively for women-owned businesses', timeToRevenue: '3-4 weeks' },
-    ]
-  };
+  return require('./cert-tracker').getStatus();
 }
 
-module.exports = { scanAll, manualScan, scanSAMgov, scanBidNetDirect, scanNJSTART, getCertRecommendations };
+async function manualScan(req, res) { return scanAll(req, res); }
+
+module.exports = { scanAll, manualScan, scanSAMgov, scanBidNetDirect, getCertRecommendations };
