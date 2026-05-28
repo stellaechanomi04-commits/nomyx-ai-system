@@ -4,48 +4,66 @@ const { analyzeAll } = require('./bid-analyzer');
 
 const SAM_KEY = process.env.SAM_API_KEY;
 
-// Format date as MM/dd/yyyy for SAM.gov API
 function fmtDate(d) {
   return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}/${d.getFullYear()}`;
 }
-function daysAgo(n) { const d = new Date(); d.setDate(d.getDate()-n); return fmtDate(d); }
 function fromToday(n) { const d = new Date(); d.setDate(d.getDate()+n); return d.toISOString().split('T')[0]; }
 function daysUntil(date) { if (!date) return 30; return Math.ceil((new Date(date)-new Date())/(1000*60*60*24)); }
 function parseValue(val) { if (!val) return 0; return parseFloat(String(val).replace(/[$,]/g,'')) || 0; }
 
-// SAM.gov - FIXED: now includes both postedFrom AND postedTo (required by API)
+// NAICS codes for logistics/transport — ONLY these are valid for NOMYX
+const NOMYX_NAICS = ['488510','492110','492210','493110','541614','561110','561210','485999','484110','484121'];
+
+// Keywords that confirm a bid is logistics-relevant
+const LOGISTICS_KEYWORDS = [
+  'logistics','courier','freight','transport','delivery','dispatch',
+  'medical courier','specimen transport','last.?mile','distribution',
+  'coordination service','carrier','shipping','supply chain'
+];
+
+function isLogisticsRelevant(opp) {
+  const text = (opp.title + ' ' + (opp.description||'')).toLowerCase();
+  // Must match at least one logistics keyword OR be exact NAICS match
+  const naicsMatch = NOMYX_NAICS.includes(opp.naicsCode);
+  const keywordMatch = LOGISTICS_KEYWORDS.some(kw => new RegExp(kw).test(text));
+  return naicsMatch || keywordMatch;
+}
+
+// SAM.gov scan — with proper filters
 async function scanSAMgov() {
   const bids = [];
-  const naicsCodes = ['488510','492110','492210','541614','561110'];
-  const keywords = ['logistics','courier','freight transport','medical courier','dispatch','transportation coordination'];
-  const from = daysAgo(30);
-  const to = fmtDate(new Date());
+  const today = new Date();
+  const thirtyDaysAgo = new Date(today - 30*24*60*60*1000);
+  const from = fmtDate(thirtyDaysAgo);
+  const to = fmtDate(today);
 
-  // Search by NAICS codes
-  for (const naics of naicsCodes) {
+  // Search by each core NAICS code
+  for (const naics of ['488510','492110','492210','541614']) {
     try {
       const res = await axios.get('https://api.sam.gov/opportunities/v2/search', {
         params: { api_key: SAM_KEY, naicsCode: naics, limit: 10, postedFrom: from, postedTo: to, ptype: 'o,p,r,s' },
         timeout: 15000
       });
       (res.data?.opportunitiesData || []).forEach(opp => {
-        const loc = JSON.stringify(opp).toUpperCase();
-        if (profile.company.states.some(s => loc.includes(s)) || loc.includes('NATIONWIDE') || loc.includes('MULTIPLE')) {
-          bids.push(formatSAMBid(opp, 'NAICS'));
+        if (isLogisticsRelevant(opp)) {
+          bids.push(formatSAMBid(opp));
         }
       });
     } catch(e) { console.error(`[SAM] NAICS ${naics} failed:`, e.response?.data?.errorMessage || e.message); }
   }
 
-  // Also search by keywords for broader results
-  for (const kw of keywords.slice(0,3)) {
+  // Keyword searches for logistics bids across all NAICS
+  const keywords = ['courier services', 'freight transportation', 'logistics support', 'medical courier', 'transportation coordination'];
+  for (const kw of keywords) {
     try {
       const res = await axios.get('https://api.sam.gov/opportunities/v2/search', {
-        params: { api_key: SAM_KEY, q: kw, limit: 5, postedFrom: from, postedTo: to, ptype: 'o' },
+        params: { api_key: SAM_KEY, q: `"${kw}"`, limit: 5, postedFrom: from, postedTo: to, ptype: 'o' },
         timeout: 15000
       });
       (res.data?.opportunitiesData || []).forEach(opp => {
-        bids.push(formatSAMBid(opp, 'keyword'));
+        if (isLogisticsRelevant(opp)) {
+          bids.push(formatSAMBid(opp));
+        }
       });
     } catch(e) { console.error(`[SAM] keyword "${kw}" failed:`, e.message); }
   }
@@ -55,7 +73,7 @@ async function scanSAMgov() {
   return bids.filter(b => { if(seen.has(b.id)) return false; seen.add(b.id); return true; });
 }
 
-function formatSAMBid(opp, source) {
+function formatSAMBid(opp) {
   const state = opp.placeOfPerformance?.state?.code || '';
   const city = opp.placeOfPerformance?.city?.name || '';
   return {
@@ -72,13 +90,13 @@ function formatSAMBid(opp, source) {
     type: opp.type,
     url: `https://sam.gov/opp/${opp.noticeId}`,
     platform: 'samgov',
-    description: opp.description?.substring(0,200),
-    matchType: source
+    description: opp.description?.substring(0, 300),
+    solicitationNumber: opp.solicitationNumber
   };
 }
 
-// BidNet Direct - active known bids
-async function scanBidNetDirect() {
+// BidNet Direct — active known bids
+function getBidNetBids() {
   return [
     {
       id: 'bidnet-camden-medical-2026',
@@ -90,11 +108,12 @@ async function scanBidNetDirect() {
       deadline: fromToday(14),
       deadlineDays: 14,
       estimatedValue: 75000,
-      setAside: 'Check docs',
+      setAside: 'Check bid docs — possible SBE preference',
       type: 'RFP',
       url: 'https://www.bidnetdirect.com',
       platform: 'bidnetdirect',
-      priority: 'URGENT'
+      priority: 'URGENT',
+      solicitationNumber: 'BND-CAM-2026-MC'
     },
     {
       id: 'bidnet-mercer-logistics-2026',
@@ -110,23 +129,10 @@ async function scanBidNetDirect() {
       type: 'RFP',
       url: 'https://www.bidnetdirect.com',
       platform: 'bidnetdirect',
-      priority: 'HIGH'
+      priority: 'HIGH',
+      solicitationNumber: 'MER-2026-LOG'
     }
   ];
-}
-
-// NJSTART - returns empty if URL fails
-async function scanNJSTART() {
-  try {
-    const res = await axios.get('https://www.njstart.gov/bso/external/publicBidSearch.sdo', {
-      params: { displayMode: 'abstract', bidCategory: '72' },
-      timeout: 8000
-    });
-    return [];
-  } catch(e) {
-    console.log('[NJSTART] Unavailable:', e.message);
-    return [];
-  }
 }
 
 // Subcontracting
@@ -145,35 +151,50 @@ function getSubOpportunities() {
     type: 'Subcontract',
     url: 'https://eweb1.sba.gov/subnet',
     platform: 'subcontracting',
-    note: 'Great entry point — no past performance required'
+    note: 'Entry point — no past performance required as sub'
   }];
 }
 
 // SCAN ALL
 async function scanAll(req, res) {
   console.log('[NOMYX] Scanning all platforms...');
-  const [sam, bidnet, njstart] = await Promise.allSettled([
+  const [samResult, bidnetBids, subBids] = await Promise.allSettled([
     scanSAMgov(),
-    scanBidNetDirect(),
-    scanNJSTART()
+    Promise.resolve(getBidNetBids()),
+    Promise.resolve(getSubOpportunities())
   ]);
 
-  const samBids = sam.status === 'fulfilled' ? sam.value : [];
-  const bidnetBids = bidnet.status === 'fulfilled' ? bidnet.value : [];
-  const njstartBids = njstart.status === 'fulfilled' ? njstart.value : [];
-  const subBids = getSubOpportunities();
+  const samBids = samResult.status === 'fulfilled' ? samResult.value : [];
+  const bidnet = bidnetBids.status === 'fulfilled' ? bidnetBids.value : [];
+  const sub = subBids.status === 'fulfilled' ? subBids.value : [];
 
-  let allBids = [...samBids, ...bidnetBids, ...njstartBids, ...subBids];
+  let allBids = [...samBids, ...bidnet, ...sub];
+
+  // Deduplicate
   const seen = new Set();
   allBids = allBids.filter(b => { if(seen.has(b.id)) return false; seen.add(b.id); return true; });
 
-  console.log(`[NOMYX] Found ${allBids.length} bids (SAM:${samBids.length}, BidNet:${bidnetBids.length}, Sub:${subBids.length})`);
+  console.log(`[NOMYX] Scan complete: ${samBids.length} SAM + ${bidnet.length} BidNet + ${sub.length} Sub = ${allBids.length} total`);
+
   const analyzed = await analyzeAll(allBids);
 
   const result = {
     scanTime: new Date().toISOString(),
     totalFound: analyzed.length,
-    sources: { samgov: samBids.length, bidnetDirect: bidnetBids.length, njstart: njstartBids.length, subcontracting: subBids.length },
+    sources: {
+      samgov: samBids.length,
+      bidnetDirect: bidnet.length,
+      njstart: 0,
+      subcontracting: sub.length,
+      status: {
+        samgov: samBids.length > 0 ? 'working' : 'no results',
+        bidnetDirect: 'manual login required — 2 known bids loaded',
+        njstart: 'unavailable via API — check njstart.gov manually',
+        paEmarketplace: 'not connected — check pasupplierportal.state.pa.us manually',
+        gmail: 'not connected — Phase 2',
+        socialMedia: 'not connected — Phase 3'
+      }
+    },
     summary: buildSummary(analyzed),
     urgent: analyzed.filter(b => b.deadlineDays <= 14),
     prime: analyzed.filter(b => b.analysis?.bidAsPrime),
@@ -194,9 +215,9 @@ function buildSummary(bids) {
     totalBids: bids.length,
     goOpportunities: go.length,
     urgentDeadlines: urgent.length,
-    topOpportunity: bids[0]?.title || 'None found',
+    topOpportunity: urgent[0]?.title || go[0]?.title || 'None found',
     stellaFocus: urgent.length > 0
-      ? `🔴 ACT TODAY: "${urgent[0].title}" — ${urgent[0].deadlineDays} days left`
+      ? `🔴 ACT TODAY: "${urgent[0].title}" — ${urgent[0].deadlineDays} days left (${urgent[0].agency})`
       : go.length > 0 ? `✅ Review: "${go[0].title}"` : 'Check bid platforms for new opportunities'
   };
 }
@@ -207,4 +228,4 @@ function getCertRecommendations() {
 
 async function manualScan(req, res) { return scanAll(req, res); }
 
-module.exports = { scanAll, manualScan, scanSAMgov, scanBidNetDirect, getCertRecommendations };
+module.exports = { scanAll, manualScan, scanSAMgov, getBidNetBids, getCertRecommendations };
