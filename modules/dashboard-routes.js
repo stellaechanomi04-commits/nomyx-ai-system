@@ -29,8 +29,15 @@ router.post('/login', express.urlencoded({ extended: false }), (req, res) => {
   if (password === correctPassword) {
     req.session.loggedIn = true;
     req.session.loginTime = new Date().toISOString();
-    res.redirect('/dashboard');
+    req.session.save((err) => {
+      if (err) {
+        console.error('[Dashboard] Session save error:', err);
+        return res.send(html.loginPage('Session error. Please try again.'));
+      }
+      res.redirect('/dashboard');
+    });
   } else {
+    console.log('[Dashboard] Failed login attempt');
     res.send(html.loginPage('Incorrect password. Please try again.'));
   }
 });
