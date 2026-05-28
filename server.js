@@ -171,3 +171,61 @@ app.get('/auth/gmail/callback', async (req, res) => {
 
 app.get('/emails/pending', gmailMonitor.getPending || ((req,res) => res.json({ message: 'Email module loading' })));
 app.post('/emails/approve/:id', gmailMonitor.approveReply || ((req,res) => res.json({ error: 'not loaded' })));
+
+// ── TEST ENDPOINTS ─────────────────────────────────────────────────────────
+
+// Manual email test
+app.get('/test-email', async (req, res) => {
+  try {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.resend.com', port: 465, secure: true,
+      auth: { user: 'resend', pass: process.env.RESEND_API_KEY }
+    });
+    const info = await transporter.sendMail({
+      from: process.env.FROM_EMAIL || 'NOMYX AI <noreply@nomyxlogistics.com>',
+      to: process.env.NOTIFY_EMAIL || 'info@nomyxlogistics.com',
+      subject: `✅ NOMYX Phase 1 Test — ${new Date().toLocaleString()}`,
+      html: `<h2>✅ NOMYX AI System Email Test PASSED</h2>
+<p>This confirms your email system is fully operational.</p>
+<table border="1" cellpadding="8" style="border-collapse:collapse">
+<tr><td><b>Sent at</b></td><td>${new Date().toLocaleString()}</td></tr>
+<tr><td><b>From</b></td><td>${process.env.FROM_EMAIL}</td></tr>
+<tr><td><b>To</b></td><td>${process.env.NOTIFY_EMAIL}</td></tr>
+<tr><td><b>Resend Key</b></td><td>✅ Present</td></tr>
+<tr><td><b>Domain</b></td><td>nomyxlogistics.com ✅ Verified</td></tr>
+</table>
+<p><a href="https://nomyx-ai-system-production.up.railway.app/daily-brief">View your live dashboard →</a></p>`
+    });
+    res.json({ success: true, messageId: info.messageId, to: process.env.NOTIFY_EMAIL, message: 'Test email sent! Check info@nomyxlogistics.com' });
+  } catch(e) {
+    res.status(500).json({ success: false, error: e.message, hint: 'Check RESEND_API_KEY and FROM_EMAIL variables in Railway' });
+  }
+});
+
+// Manual scan + email trigger
+app.get('/trigger-daily', async (req, res) => {
+  try {
+    res.json({ status: 'triggered', message: 'Daily scan + email starting in background' });
+    const scanResult = await bidScanner.scanAll();
+    await notifications.sendDailyReport(scanResult);
+    console.log('[NOMYX] Manual daily trigger completed — email sent to', process.env.NOTIFY_EMAIL);
+  } catch(e) { console.error('[NOMYX] Daily trigger failed:', e.message); }
+});
+
+// System health check
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    version: '3.0',
+    timestamp: new Date().toISOString(),
+    env: {
+      NOTIFY_EMAIL: process.env.NOTIFY_EMAIL || '❌ missing',
+      RESEND_API_KEY: process.env.RESEND_API_KEY ? '✅ present' : '❌ missing',
+      SAM_API_KEY: process.env.SAM_API_KEY ? '✅ present' : '❌ missing',
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? '✅ present' : '❌ missing',
+      FROM_EMAIL: process.env.FROM_EMAIL || '❌ missing',
+      PORT: process.env.PORT || '3000'
+    }
+  });
+});
