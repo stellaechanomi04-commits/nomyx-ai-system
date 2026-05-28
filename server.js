@@ -4,12 +4,23 @@ const session = require('express-session');
 const app = express();
 app.use(express.json());
 
+// Trust Railway's reverse proxy
+app.set('trust proxy', 1);
+
+// Global body parser (needed for login form)
+app.use(require('express').urlencoded({ extended: false }));
+
 // Session middleware for dashboard login
 app.use(session({
   secret: process.env.SESSION_SECRET || 'nomyx-secret-2026-x9k',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000,
+    sameSite: 'lax'
+  }
 }));
 
 // Dashboard routes (password protected)
