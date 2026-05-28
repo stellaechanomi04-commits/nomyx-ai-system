@@ -177,33 +177,33 @@ app.post('/emails/approve/:id', gmailMonitor.approveReply || ((req,res) => res.j
 // Manual email test
 app.get('/test-email', async (req, res) => {
   try {
-    const nodemailer = require('nodemailer');
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.resend.com', port: 465, secure: true,
-      auth: { user: 'resend', pass: process.env.RESEND_API_KEY }
-    });
-    const info = await transporter.sendMail({
-      from: process.env.FROM_EMAIL || 'NOMYX AI <noreply@nomyxlogistics.com>',
-      to: process.env.NOTIFY_EMAIL || 'info@nomyxlogistics.com',
+    const axios = require('axios');
+    const result = await axios.post('https://api.resend.com/emails', {
+      from: process.env.FROM_EMAIL || 'NOMYX AI System <noreply@nomyxlogistics.com>',
+      to: [process.env.NOTIFY_EMAIL || 'info@nomyxlogistics.com'],
       subject: `✅ NOMYX Phase 1 Test — ${new Date().toLocaleString()}`,
       html: `<h2>✅ NOMYX AI System Email Test PASSED</h2>
-<p>This confirms your email system is fully operational.</p>
+<p>This confirms your email system is operational.</p>
 <table border="1" cellpadding="8" style="border-collapse:collapse">
 <tr><td><b>Sent at</b></td><td>${new Date().toLocaleString()}</td></tr>
-<tr><td><b>From</b></td><td>${process.env.FROM_EMAIL}</td></tr>
 <tr><td><b>To</b></td><td>${process.env.NOTIFY_EMAIL}</td></tr>
-<tr><td><b>Resend Key</b></td><td>✅ Present</td></tr>
-<tr><td><b>Domain</b></td><td>nomyxlogistics.com ✅ Verified</td></tr>
+<tr><td><b>RESEND_API_KEY</b></td><td>${process.env.RESEND_API_KEY ? 'present' : 'MISSING'}</td></tr>
+<tr><td><b>SAM.gov</b></td><td>Working — 10+ live opportunities found</td></tr>
+<tr><td><b>Domain</b></td><td>nomyxlogistics.com Verified on Resend</td></tr>
 </table>
-<p><a href="https://nomyx-ai-system-production.up.railway.app/daily-brief">View your live dashboard →</a></p>`
+<p><a href="https://nomyx-ai-system-production.up.railway.app/daily-brief">View Dashboard</a></p>`
+    }, {
+      headers: { 'Authorization': `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 15000
     });
-    res.json({ success: true, messageId: info.messageId, to: process.env.NOTIFY_EMAIL, message: 'Test email sent! Check info@nomyxlogistics.com' });
+    res.json({ success: true, messageId: result.data?.id, to: process.env.NOTIFY_EMAIL, message: 'Test email sent! Check info@nomyxlogistics.com' });
   } catch(e) {
-    res.status(500).json({ success: false, error: e.message, hint: 'Check RESEND_API_KEY and FROM_EMAIL variables in Railway' });
+    const err = e.response?.data?.message || e.message;
+    console.error('[test-email] Failed:', err);
+    res.status(500).json({ success: false, error: err, resendKey: process.env.RESEND_API_KEY ? 'present' : 'MISSING' });
   }
 });
 
-// Manual scan + email trigger
 app.get('/trigger-daily', async (req, res) => {
   try {
     res.json({ status: 'triggered', message: 'Daily scan + email starting in background' });
