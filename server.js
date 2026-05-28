@@ -1,7 +1,23 @@
 require('dotenv').config();
 const express = require('express');
+const session = require('express-session');
 const app = express();
 app.use(express.json());
+
+// Session middleware for dashboard login
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'nomyx-secret-2026-x9k',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+}));
+
+// Dashboard routes (password protected)
+const dashboardRouter = require('./modules/dashboard-routes');
+app.use('/dashboard', dashboardRouter);
+
+// Redirect root to dashboard
+app.get('/go', (req, res) => res.redirect('/dashboard'));
 
 const load = (p) => { try { return require(p); } catch(e) { console.error('Module error:', p, e.message); return {}; } };
 
