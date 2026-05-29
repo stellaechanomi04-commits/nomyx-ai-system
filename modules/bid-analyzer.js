@@ -121,7 +121,7 @@ Respond ONLY with this exact JSON (no markdown):
 }`;
 
       const response = await client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 1200, messages: [{ role: 'user', content: prompt }] });
-      const aiResult = JSON.parse(response.content[0].text.trim());
+      const aiResult = JSON.parse(response.content[0].text.trim().replace(/^```(?:json)?\n?/,'').replace(/\n?```$/,''));
       return { ...aiResult, fitScore: score, fitFlags: flags, category, difficulty: difficulty.label, startupCost: startup, source: 'AI' };
     } catch(e) {
       console.error('[Analyzer] AI failed, using smart fallback:', e.message);
