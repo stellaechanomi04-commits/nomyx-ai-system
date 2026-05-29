@@ -81,7 +81,7 @@ async function scanSAMgov() {
 function formatSAMBid(opp, searchTerm) {
   const state = opp.placeOfPerformance?.state?.code || '';
   const city  = opp.placeOfPerformance?.city?.name  || '';
-  const dl    = opp.responseDeadLine;
+  const dl    = opp.responseDeadLine || opp.archiveDate;
 
   return {
     id: opp.noticeId,
