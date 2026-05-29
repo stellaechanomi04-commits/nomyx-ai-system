@@ -146,10 +146,10 @@ function homePage(scanData, lastScan, lastEmail) {
 ${urgent.length > 0 ? `<div class="alert alert-urgent">⚠️ ${urgent.length} urgent bid${urgent.length>1?'s':''} need your attention today!</div>` : `<div class="alert alert-ok">✅ No critical deadlines today</div>`}
 
 <div class="stat-grid">
-  <div class="stat"><div class="stat-val">${bids.length}</div><div class="stat-label">Bids Found</div></div>
-  <div class="stat"><div class="stat-val" style="color:#ff6d00">${urgent.length}</div><div class="stat-label">Urgent (≤14d)</div></div>
-  <div class="stat"><div class="stat-val" style="color:#00c853">${go.length}</div><div class="stat-label">GO Bids</div></div>
-  <div class="stat"><div class="stat-val" style="color:#ab47bc">${sources.samgov||0}</div><div class="stat-label">SAM.gov</div></div>
+  <div class="stat"><div class="stat-val" style="color:#00c853">${scanData?.verifiedCount||0}</div><div class="stat-label">✅ Verified</div></div>
+  <div class="stat"><div class="stat-val" style="color:#ff6d00">${scanData?.unconfirmedCount||0}</div><div class="stat-label">⚠️ Unconfirmed</div></div>
+  <div class="stat"><div class="stat-val" style="color:#ff6d00">${urgent.length}</div><div class="stat-label">Urgent (verified)</div></div>
+  <div class="stat"><div class="stat-val" style="color:#7a9bb5">${bids.length}</div><div class="stat-label">Total Signals</div></div>
 </div>
 
 <div class="card">
@@ -185,32 +185,61 @@ ${urgent.length > 0 ? `<div class="alert alert-urgent">⚠️ ${urgent.length} u
 }
 
 function bidsPage(bids = [], decisions = {}) {
+  const vColors = {
+    'VERIFIED': '#00c853',
+    'DOCUMENTS_DOWNLOADED': '#00c853',
+    'MANUAL_LOGIN_NEEDED': '#ffd600',
+    'NEEDS_REVIEW': '#ffd600',
+    'UNCONFIRMED': '#ff6d00',
+    'PLACEHOLDER': '#ff1744',
+    'ERROR': '#ff1744'
+  };
+
   const rows = bids.map(b => {
-    const goColor = b.analysis?.goNoGo === 'GO' ? '#00c853' : b.analysis?.goNoGo === 'CONDITIONAL GO' ? '#ffd600' : '#7a9bb5';
-    const isUrgent = b.deadlineDays <= 14;
+    const vStatus = b.verificationStatus || 'UNCONFIRMED';
+    const vColor = vColors[vStatus] || '#ff6d00';
+    const isVerified = vStatus === 'VERIFIED' || vStatus === 'DOCUMENTS_DOWNLOADED';
+    const isFake = b.isFake === true;
+    const isUrgent = b.deadlineDays != null && b.deadlineDays <= 14 && isVerified;
+    const goColor = isVerified ? '#4dd0e1' : '#ff6d00';
+
     return `
-<div class="bid-row ${isUrgent?'urgent':b.analysis?.goNoGo==='GO'?'go':''}">
+<div class="bid-row ${isUrgent?'urgent':''}" style="border-left-color:${vColor}">
+  <!-- Verification Banner -->
+  <div style="background:${vColor}15;border-bottom:1px solid ${vColor}33;margin:-14px -16px 12px;padding:8px 16px;display:flex;align-items:center;gap:8px">
+    <span class="badge" style="background:${vColor}22;color:${vColor};border:1px solid ${vColor}44;font-size:12px">
+      ${vStatus === 'VERIFIED' ? '✅ VERIFIED' : vStatus === 'MANUAL_LOGIN_NEEDED' ? '🔐 MANUAL LOGIN NEEDED' : vStatus === 'UNCONFIRMED' || isFake ? '🚫 UNCONFIRMED — DO NOT BID' : '⚠️ '+vStatus}
+    </span>
+    <span style="font-size:11px;color:${vColor};opacity:0.8">${b.verificationNote ? b.verificationNote.substring(0,100) : ''}</span>
+  </div>
+
   <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
     <div>
       <div style="display:flex;gap:6px;margin-bottom:4px;flex-wrap:wrap">
-        <span class="badge" style="background:${goColor}22;color:${goColor};border:1px solid ${goColor}44">${b.analysis?.goNoGo||'PENDING'}</span>
-        ${isUrgent?`<span class="badge badge-urgent">⏰ ${b.deadlineDays}d LEFT</span>`:''}
+        ${isUrgent?`<span class="badge badge-urgent">⏰ ${b.deadlineDays}d LEFT — CONFIRMED</span>`:''}
         <span class="badge badge-off">${b.source}</span>
+        ${b.naics?`<span class="badge badge-off">NAICS: ${b.naics}</span>`:''}
       </div>
       <div class="bid-title">${b.title}</div>
-      <div class="bid-meta">${b.agency} · ${b.location} · ${b.naics||''}</div>
-      ${b.solicitationNumber?`<div style="font-size:11px;color:#4dd0e188">Solicitation: ${b.solicitationNumber}</div>`:''}
+      <div class="bid-meta">${b.agency} · ${b.location || ''}</div>
+      ${isVerified && b.solicitationNumber?`<div style="font-size:11px;color:#00c853">✅ Sol#: ${b.solicitationNumber}</div>`:''}
+      ${isFake?`<div style="font-size:11px;color:#ff1744;font-weight:700">⛔ Deadline: NOT CONFIRMED · Value: NOT CONFIRMED · Sol#: NOT CONFIRMED</div>`:''}
     </div>
-    <div style="font-size:12px;color:#ff6d00;font-weight:700;white-space:nowrap">
-      ${b.deadline?b.deadline.split('T')[0]:'TBD'}
+    <div style="font-size:12px;font-weight:700;white-space:nowrap;color:${isVerified?'#ff6d00':'#7a9bb5'}">
+      ${isVerified && b.deadline ? b.deadline.split('T')[0]+' ✅' : '⚠️ Verify First'}
     </div>
   </div>
-  <div class="bid-actions">
+
+  ${b.manualAction?`<div style="background:#1a1000;border:1px solid #ffd60033;border-radius:6px;padding:8px 12px;margin:10px 0;font-size:12px;color:#ffd600">👉 Action needed: ${b.manualAction}</div>`:''}
+
+  <div class="bid-actions" style="margin-top:10px">
     <a href="/dashboard/bid/${b.id}" class="btn btn-primary">View Details</a>
+    ${isVerified ? `
     <a href="/dashboard/bid/${b.id}/decision?d=GO" class="btn btn-go">✅ BID</a>
     <a href="/dashboard/bid/${b.id}/decision?d=REVIEW" class="btn btn-review">🔖 Review Later</a>
-    <a href="/dashboard/bid/${b.id}/decision?d=NO-GO" class="btn btn-nogo">❌ Skip</a>
-    ${b.url?`<a href="${b.url}" target="_blank" class="btn btn-primary">🔗 Source</a>`:''}
+    <a href="/dashboard/bid/${b.id}/decision?d=NO-GO" class="btn btn-nogo">❌ Skip</a>` : `
+    <span style="font-size:12px;color:#7a9bb5;padding:7px 0">Verify before deciding →</span>`}
+    ${b.url?`<a href="${b.url}" target="_blank" class="btn btn-primary">🔗 Open Portal</a>`:''}
   </div>
 </div>`;
   });
