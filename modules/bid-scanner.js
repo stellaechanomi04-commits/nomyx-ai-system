@@ -72,7 +72,10 @@ async function scanSAMgov() {
   }
 
   console.log(`[SAM] Found ${bids.length} verified opportunities`);
-  return bids;
+  const RELEVANT_NAICS=new Set(['488510','492110','492210','541614']);
+  const RELEVANT_KW=/courier|logistics|freight|transport|delivery|dispatch|specimen|medical|administrative/i;
+  const filteredBids=bids.filter(b=>RELEVANT_NAICS.has(b.naics)||RELEVANT_KW.test(b.title)||b.isFake===true);
+  return filteredBids;
 }
 
 function formatSAMBid(opp, searchTerm) {
