@@ -15,7 +15,7 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'nomyx-secret-2026-x9k',
   resave: false,
   saveUninitialized: false,
-  cookie: { 
+  cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000,
@@ -46,7 +46,14 @@ try {
     console.log('[NOMYX] 7am scan starting...');
     const result = await bidScanner.scanAll();
     await notifications.sendDailyReport(result);
-    const urgent = (result?.allBids||[]).filter(b => b.deadlineDays <= 3);
+    // PHASE 13 FIX: null <= 3 is true in JS (null coerces to 0).
+    // Must check deadlineDays != null AND !isFake AND VERIFIED before sending urgent alert.
+    const urgent = (result?.allBids||[]).filter(b =>
+      b.deadlineDays != null &&
+      b.deadlineDays <= 3 &&
+      !b.isFake &&
+      b.verificationStatus === 'VERIFIED'
+    );
     for (const bid of urgent) await notifications.sendUrgentAlert(bid);
   });
   cron.schedule('0 9 * * 1', async () => { await certTracker.weeklyReminder?.(); });
@@ -89,7 +96,8 @@ app.get('/daily-brief', async (req, res) => {
       greeting: '👋 Good morning Stella! Here is your NOMYX AI Daily Brief.',
       todaysFocus: scanResult?.summary?.stellaFocus || 'Review new bid opportunities',
       summary: scanResult?.summary,
-      urgentBids: bids.filter(b => b.deadlineDays <= 14),
+      // PHASE 13 FIX: null-safe — null <= 14 is true in JS, must guard
+      urgentBids: bids.filter(b => b.deadlineDays != null && b.deadlineDays <= 14 && !b.isFake),
       goBids: bids.filter(b => b.analysis?.goNoGo === 'GO'),
       criticalCerts: certs.criticalActions || [],
       actionItems: buildActionItems(bids, certs),
@@ -104,7 +112,8 @@ app.get('/scan-bids', bidScanner.manualScan || ((req,res) => res.json({error:'Sc
 // Category routes
 app.get('/bids/urgent', async (req, res) => {
   const result = await bidScanner.scanAll();
-  res.json({ urgent: (result?.allBids||[]).filter(b => b.deadlineDays <= 14) });
+  // PHASE 13 FIX: null-safe filter — exclude placeholders and null deadlines
+  res.json({ urgent: (result?.allBids||[]).filter(b => b.deadlineDays != null && b.deadlineDays <= 14 && !b.isFake) });
 });
 app.get('/bids/medical', async (req, res) => {
   const result = await bidScanner.scanAll();
@@ -157,11 +166,12 @@ app.post('/emails/approve/:id', emailMonitor.approveReply || ((req,res) => res.j
 // ── HELPERS ────────────────────────────────────────────────────────────────
 function buildActionItems(bids, certs) {
   const items = [];
-  bids.filter(b => b.deadlineDays <= 14).slice(0,2).forEach((b,i) =>
+  // PHASE 13 FIX: null-safe — exclude placeholders and null deadlines
+  bids.filter(b => b.deadlineDays != null && b.deadlineDays <= 14 && !b.isFake).slice(0,2).forEach((b,i) =>
     items.push({ priority: i+1, type: '🔴 BID', action: `Download and review: ${b.title}`, deadline: `${b.deadlineDays} days`, source: b.url }));
   (certs.criticalActions||[]).slice(0,2).forEach((c,i) =>
     items.push({ priority: 3+i, type: '⚡ CERT', action: `Get: ${c.name}`, cost: c.cost, time: c.timeToComplete, url: c.link }));
-  bids.filter(b => b.analysis?.goNoGo === 'GO' && b.deadlineDays > 14).slice(0,2).forEach((b,i) =>
+  bids.filter(b => b.analysis?.goNoGo === 'GO' && b.deadlineDays != null && b.deadlineDays > 14).slice(0,2).forEach((b,i) =>
     items.push({ priority: 5+i, type: '✅ BID', action: `Review GO bid: ${b.title}`, deadline: `${b.deadlineDays} days` }));
   return items;
 }

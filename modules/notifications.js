@@ -89,7 +89,7 @@ async function sendDailyReport(scanResult) {
   });
 
   // Urgent = ONLY verified bids with REAL deadlines <= 14 days
-  // null <= 14 is true in JS — must check != null first
+  // PHASE 13 FIX: null <= 14 is true in JS (null coerces to 0) — must check != null first
   const urgent = verifiedBids.filter(function(b) {
     return b.deadlineDays != null && b.deadlineDays <= 14;
   });
@@ -178,6 +178,14 @@ async function sendDailyReport(scanResult) {
 }
 
 async function sendUrgentAlert(bid) {
+  // PHASE 13 SAFETY: Never send URGENT alert for placeholders, fake bids, or null deadlines.
+  // Root bug: null <= 3 is true in JS (null coerces to 0) — Camden placeholder was triggering
+  // this every morning with subject "URGENT: ...null days left".
+  if (bid.isFake || bid.deadlineDays == null || bid.verificationStatus !== 'VERIFIED') {
+    console.warn('[Email] BLOCKED urgent alert — not a verified bid with real deadline:',
+      bid.title, '| isFake:', bid.isFake, '| deadlineDays:', bid.deadlineDays, '| status:', bid.verificationStatus);
+    return { success: false, blocked: true, reason: 'Not a verified bid with confirmed deadline' };
+  }
   return await sendEmail({
     to: process.env.NOTIFY_EMAIL || 'info@nomyxlogistics.com',
     subject: '⚠️ URGENT: ' + bid.title + ' — ' + bid.deadlineDays + ' days left',
