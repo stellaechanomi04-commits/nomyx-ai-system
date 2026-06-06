@@ -46,6 +46,10 @@ const bidExecutor    = load('./modules/bid-executor');
 const sbaSubnet      = load('./modules/sba-subnet');
 const sessionWorker  = load('./modules/session-worker');
 
+// ── PHASE 15: Gmail OAuth + Email Alert Ingestion ──────────────────────────
+const gmailOAuth       = load('./modules/gmail-oauth');
+const emailAlertParser = load('./modules/email-alert-parser');
+
 // ── CRON JOBS ──────────────────────────────────────────────────────────────
 try {
   const cron = require('node-cron');
@@ -189,32 +193,77 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[NOMYX] All modules loaded. Ready to run your business!`);
 });
 
-// ── GMAIL ROUTES ───────────────────────────────────────────────────────────
-const gmailMonitor = load('./modules/gmail-monitor');
+// ── GMAIL OAUTH ROUTES (Phase 15) ─────────────────────────────────────────
 
-app.get('/auth/gmail', (req, res) => {
+// GET Gmail OAuth status — which env vars are set
+app.get('/gmail/status', (req, res) => {
   try {
-    const url = gmailMonitor.getAuthUrl?.();
-    if (!url) return res.json({ error: 'Gmail module not loaded' });
-    res.json({ authUrl: url, instructions: 'Open this URL in your browser to connect Gmail', step: 'Visit the authUrl, sign in, click Allow' });
+    const status = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : { error: 'Not loaded' };
+    res.json(status);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /auth/gmail — step 1: get the Google consent URL
+// NOMYX AI does NOT complete OAuth — Stella must open the URL and click Allow herself
+app.get('/auth/gmail', (req, res) => {
+  try {
+    const result = gmailOAuth.getAuthUrl ? gmailOAuth.getAuthUrl() : null;
+    if (!result) return res.json({ error: 'Gmail OAuth module not loaded' });
+    // If result is a string, it is the auth URL. If object, it is an error with setup steps.
+    if (typeof result === 'string') {
+      res.json({
+        authUrl: result,
+        instructions: 'Open this URL in your browser. Sign in with your Gmail account. Click Allow.',
+        important: 'NOMYX AI will stop here. YOU must open the URL and approve access directly.',
+        scopes: gmailOAuth.SCOPES || ['gmail.readonly'],
+        nextStep: 'After clicking Allow, Google will redirect to /auth/gmail/callback. NOMYX AI will handle the rest.',
+        security: 'Gmail password is NEVER used. This is read-only access. NOMYX AI cannot send emails or delete emails.'
+      });
+    } else {
+      // result is an error object with setup steps
+      res.status(400).json(result);
+    }
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /auth/gmail/callback — step 2: Google redirects here with ?code=...
+// Shows refresh token ONCE so Stella can add it to Railway env vars.
+// Token is NOT logged to Railway logs (no console.log of token).
 app.get('/auth/gmail/callback', async (req, res) => {
   try {
     const { code } = req.query;
-    const tokens = await gmailMonitor.handleCallback?.(code);
+    if (!code) return res.status(400).json({ error: 'No authorization code in request. Did you approve OAuth?' });
+    const result = await gmailOAuth.handleCallback(code);
+    if (!result.hasRefreshToken) {
+      return res.json({
+        success: false,
+        warning: 'No refresh token returned. This may happen if OAuth was already approved once. Revoke Gmail access in your Google Account settings and try again.',
+        accessGranted: true
+      });
+    }
+    // Show token ONCE — Stella must copy to Railway immediately
+    // We do NOT log this token to console (Railway logs would capture console.log)
     res.json({
       success: true,
-      message: '✅ Gmail connected! Add this REFRESH TOKEN to Railway variables as GMAIL_REFRESH_TOKEN',
-      refreshToken: tokens?.refresh_token,
-      nextStep: 'Copy the refreshToken above → Railway → Variables → Add GMAIL_REFRESH_TOKEN'
+      message: '✅ Gmail connected! Copy the REFRESH TOKEN below → Railway → Variables → GMAIL_REFRESH_TOKEN',
+      GMAIL_REFRESH_TOKEN: result.refreshToken,
+      important: 'This token will NOT be shown again. Copy it to Railway now.',
+      nextSteps: [
+        '1. Copy GMAIL_REFRESH_TOKEN value above',
+        '2. Go to Railway → nomyx-ai-system → Variables',
+        '3. Add variable: GMAIL_REFRESH_TOKEN = (paste token)',
+        '4. Railway will redeploy automatically',
+        '5. Verify at /gmail/status — should show ✅ present'
+      ],
+      security: [
+        'Token is not stored by NOMYX AI — only in Railway env vars',
+        'Token is not logged to console or Railway logs',
+        'Scope: gmail.readonly only — NOMYX AI cannot send or delete emails',
+        'Gmail password was never used'
+      ]
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-app.get('/emails/pending', gmailMonitor.getPending || ((req,res) => res.json({ message: 'Email module loading' })));
-app.post('/emails/approve/:id', gmailMonitor.approveReply || ((req,res) => res.json({ error: 'not loaded' })));
 
 // ── TEST ENDPOINTS ─────────────────────────────────────────────────────────
 
@@ -261,8 +310,8 @@ app.get('/trigger-daily', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
-    version: '3.1',
-    phase: 'Phase 14 — Portal Operator + Phone Approval',
+    version: '3.2',
+    phase: 'Phase 15 — Gmail OAuth + Email Alert Ingestion',
     timestamp: new Date().toISOString(),
     env: {
       NOTIFY_EMAIL: process.env.NOTIFY_EMAIL || '❌ missing',
@@ -271,10 +320,15 @@ app.get('/health', (req, res) => {
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? '✅ present' : '❌ missing',
       FROM_EMAIL: process.env.FROM_EMAIL || '❌ missing',
       PLAYWRIGHT_ENABLED: process.env.PLAYWRIGHT_ENABLED || 'false',
+      GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? '✅ present' : '❌ missing — needed for Gmail OAuth',
+      GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? '✅ present' : '❌ missing — needed for Gmail OAuth',
+      GMAIL_REFRESH_TOKEN: process.env.GMAIL_REFRESH_TOKEN ? '✅ present' : '❌ missing — run /auth/gmail OAuth flow',
       PORT: process.env.PORT || '3000'
     },
     portalSessions: portalSessions.getSummary ? portalSessions.getSummary() : 'not loaded',
-    approvalTasks: phoneApproval.getSummary ? phoneApproval.getSummary() : 'not loaded'
+    approvalTasks: phoneApproval.getSummary ? phoneApproval.getSummary() : 'not loaded',
+    gmailOAuth: gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : 'not loaded',
+    emailAlerts: emailAlertParser.getAlertSummary ? emailAlertParser.getAlertSummary() : 'not loaded'
   });
 });
 
@@ -520,11 +574,17 @@ app.get('/m', async (req, res) => {
     const portals = portalSessions.getAllSessions ? portalSessions.getAllSessions() : [];
     const portalsNeedingLogin = portalSessions.getPortalsNeedingLogin ? portalSessions.getPortalsNeedingLogin() : [];
     const pendingTasks = phoneApproval.getPendingTasks ? phoneApproval.getPendingTasks() : [];
+    // Phase 15: email alerts
+    const emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    const newAlerts = emailAlerts.filter(function(a) { return a.verificationStatus === 'EMAIL_ALERT_FOUND'; });
+    const alertSummary = emailAlertParser.getAlertSummary ? emailAlertParser.getAlertSummary() : { total: 0 };
+    const gmailStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : { status: 'NOT_CONNECTED' };
 
     var statusColor = '#28a745';
     var statusMsg = 'All Systems Scanning';
     if (portalsNeedingLogin.length > 0) { statusColor = '#dc3545'; statusMsg = portalsNeedingLogin.length + ' Portal(s) Need Login'; }
     else if (pendingTasks.length > 0) { statusColor = '#ffc107'; statusMsg = pendingTasks.length + ' Action(s) Pending'; }
+    else if (newAlerts.length > 0) { statusColor = '#17a2b8'; statusMsg = newAlerts.length + ' New Email Alert(s)'; }
 
     var loginBanner = portalsNeedingLogin.length > 0
       ? '<div style="background:#dc3545;color:white;padding:16px;border-radius:8px;margin-bottom:14px">'
@@ -563,18 +623,86 @@ app.get('/m', async (req, res) => {
     var portalCards = portals.slice(0, 6).map(function(p) {
       var color = p.sessionStatus === 'Active' ? '#28a745' : p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' ? '#dc3545' : '#6c757d';
       var dot = p.sessionStatus === 'Active' ? '🟢' : p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' ? '🔴' : '⚫';
+    var portalCards = portals.slice(0, 6).map(function(p) {
+      var color = p.sessionStatus === 'Active' ? '#28a745' : p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' ? '#dc3545' : '#6c757d';
+      var dot = p.sessionStatus === 'Active' ? 'O' : p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' ? 'X' : '-';
       return '<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">'
         + '<div><strong style="font-size:13px">' + p.name + '</strong><br><span style="color:' + color + ';font-size:12px">' + dot + ' ' + p.sessionStatus + '</span></div>'
         + '<div style="text-align:right;font-size:12px">'
-        + (p.sessionStatus !== 'Active' && p.sessionStatus !== 'Manual Review' && p.sessionStatus !== 'N/A — public'
-            ? '<a href="' + (p.loginUrl || '#') + '" style="color:#1d3557;display:block">Login →</a>'
-            : '<span style="color:#28a745">✓ Scanning</span>')
+        + (p.sessionStatus !== 'Active' && p.sessionStatus !== 'Manual Review' && p.sessionStatus !== 'N/A'
+            ? '<a href="' + (p.loginUrl || '#') + '" style="color:#1d3557;display:block">Login</a>'
+            : '<span style="color:#28a745">Scanning</span>')
         + '</div></div>';
     }).join('');
 
+    // Phase 15: Email alert section for /m
+    var gmailConnected = gmailStatus.status === 'CONNECTED';
+    var gmailSetupBanner = !gmailConnected
+      ? '<div style="background:#e8f4fd;border:1px solid #17a2b8;padding:12px;border-radius:8px;margin-bottom:12px;font-size:13px">'
+        + '<strong>Email Alerts Not Connected</strong><br>'
+        + '<span style="color:#555">Connect Gmail to auto-import bid alerts from BidNet, NJSTART, SAM.gov, and more.</span><br>'
+        + '<a href="/auth/gmail" style="color:#17a2b8;font-size:12px;display:inline-block;margin-top:6px">Connect Gmail</a>'
+        + '</div>'
+      : '';
+    var emailAlertSection = newAlerts.length > 0
+      ? '<h2>New Email Alerts (' + newAlerts.length + ')</h2>'
+        + newAlerts.slice(0, 5).map(function(a) {
+            return '<div style="border:1px solid #17a2b8;border-left:4px solid #17a2b8;border-radius:8px;padding:12px;margin-bottom:8px">'
+              + '<strong style="font-size:13px">' + (a.title || 'Untitled Alert') + '</strong><br>'
+              + '<span style="color:#666;font-size:12px">' + (a.source || '') + ' | ' + (a.agency || '') + '</span><br>'
+              + '<span style="color:#17a2b8;font-size:12px">Deadline: ' + (a.deadlineDisplay || 'Deadline not verified') + '</span><br>'
+              + '<div style="display:flex;gap:8px;margin-top:8px">'
+              + (a.url ? '<a href="' + a.url + '" style="font-size:11px;color:#1d3557;background:#e8f4fd;padding:4px 8px;border-radius:4px">View</a>' : '')
+              + '<a href="/gmail/alerts/' + a.id + '/ignore" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#666;background:#eee;padding:4px 8px;border-radius:4px">Ignore</a>'
+              + '</div></div>';
+          }).join('')
+      : gmailConnected
+        ? '<h2>Email Alerts</h2><div style="background:#d4edda;padding:12px;border-radius:8px;color:#155724;font-size:13px">No new email alerts</div>'
+        : '';
+
+    var statusColor = '#28a745';
+    var statusMsg = 'All Systems Scanning';
+    if (portalsNeedingLogin.length > 0) { statusColor = '#dc3545'; statusMsg = portalsNeedingLogin.length + ' Portal(s) Need Login'; }
+    else if (pendingTasks.length > 0) { statusColor = '#ffc107'; statusMsg = pendingTasks.length + ' Action(s) Pending'; }
+    else if (newAlerts.length > 0) { statusColor = '#17a2b8'; statusMsg = newAlerts.length + ' New Email Alert(s)'; }
+
+    var loginBanner = portalsNeedingLogin.length > 0
+      ? '<div style="background:#dc3545;color:white;padding:16px;border-radius:8px;margin-bottom:14px">'
+        + '<strong>' + portalsNeedingLogin.length + ' Portal Login Required</strong><br>'
+        + portalsNeedingLogin.map(function(p) {
+            return '<div style="margin-top:10px;background:rgba(255,255,255,0.15);padding:10px;border-radius:6px">'
+              + '<strong>' + p.name + '</strong> - ' + p.sessionStatus + '<br>'
+              + '<a href="' + (p.loginUrl || '#') + '" style="color:white;font-size:13px">Open Portal</a>'
+              + ' &nbsp; <a href="/portal-sessions/' + p.id + '/mark-active" style="color:#fffb;font-size:12px" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;">Mark Active</a>'
+              + '</div>';
+          }).join('')
+        + '</div>'
+      : '';
+
+    var taskBanner = pendingTasks.length > 0
+      ? '<div style="background:#fff3cd;border:2px solid #ffc107;padding:14px;border-radius:8px;margin-bottom:14px">'
+        + '<strong>' + pendingTasks.length + ' Pending Approval(s)</strong><br>'
+        + pendingTasks.slice(0, 3).map(function(t) {
+            return '<div style="margin-top:8px;font-size:13px"><strong>' + t.type + '</strong> - ' + t.portalName + '</div>';
+          }).join('')
+        + '<a href="/approval-tasks" style="font-size:12px;color:#856404">View all</a>'
+        + '</div>'
+      : '';
+
+    var bidCards = urgentBids.length > 0
+      ? urgentBids.slice(0, 3).map(function(b) {
+          return '<div style="border:1px solid #dc3545;border-left:4px solid #dc3545;border-radius:8px;padding:14px;margin-bottom:10px">'
+            + '<strong style="font-size:14px">' + b.title + '</strong><br>'
+            + '<span style="color:#666;font-size:12px">' + (b.agency || '') + ' | ' + (b.source || '') + '</span><br>'
+            + '<span style="color:#dc3545;font-weight:bold">Deadline: ' + b.deadlineDays + ' days</span><br>'
+            + (b.url ? '<a href="' + b.url + '" style="font-size:12px;color:#1d3557">View Bid</a>' : '')
+            + '</div>';
+        }).join('')
+      : '<div style="background:#d4edda;padding:14px;border-radius:8px;color:#155724;font-size:14px">No urgent verified bids today</div>';
+
     var html = '<!DOCTYPE html><html><head>'
       + '<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">'
-      + '<title>NOMYX AI — Command Center</title>'
+      + '<title>NOMYX AI - Command Center</title>'
       + '<meta name="theme-color" content="#1d3557">'
       + '<meta name="apple-mobile-web-app-capable" content="yes">'
       + '<meta name="apple-mobile-web-app-title" content="NOMYX AI">'
@@ -585,34 +713,248 @@ app.get('/m', async (req, res) => {
       + '.header{background:#1d3557;color:white;padding:16px;border-radius:10px;margin-bottom:14px}'
       + '.header h1{margin:0;font-size:20px}'
       + '.header p{margin:4px 0 0;opacity:0.7;font-size:12px}'
-      + '.status-dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:' + statusColor + ';margin-right:6px}'
       + '.refresh-btn{background:rgba(255,255,255,0.2);color:white;border:none;padding:8px 14px;border-radius:6px;font-size:13px;cursor:pointer;margin-top:8px}'
       + '</style>'
       + '</head><body>'
       + '<div class="header">'
-      + '<h1>🤖 NOMYX AI</h1>'
+      + '<h1>NOMYX AI</h1>'
       + '<p>' + new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }) + ' ET</p>'
-      + '<p><span class="status-dot"></span>' + statusMsg + '</p>'
-      + '<button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>'
+      + '<p>' + statusMsg + '</p>'
+      + '<button class="refresh-btn" onclick="location.reload()">Refresh</button>'
       + '</div>'
       + loginBanner
       + taskBanner
-      + '<h2>⚡ Urgent Verified Bids (' + urgentBids.length + ')</h2>'
+      + gmailSetupBanner
+      + '<h2>Urgent Verified Bids (' + urgentBids.length + ')</h2>'
       + bidCards
-      + '<h2>🌐 Portal Sessions</h2>'
+      + '<h2>Portal Sessions</h2>'
       + portalCards
+      + emailAlertSection
       + '<div style="margin-top:16px;padding:14px;background:white;border-radius:8px;font-size:13px">'
       + '<strong>Quick Links</strong><br>'
-      + '<a href="/portal-sessions" style="display:block;margin-top:8px">📋 All Portals</a>'
-      + '<a href="/approval-tasks" style="display:block;margin-top:6px">✅ Approval Tasks</a>'
-      + '<a href="/daily-command-center" style="display:block;margin-top:6px">📊 Full Dashboard JSON</a>'
-      + '<a href="/daily-brief" style="display:block;margin-top:6px">📧 Daily Brief</a>'
-      + '<a href="/trigger-daily" style="display:block;margin-top:6px">▶ Trigger Daily Scan</a>'
+      + '<a href="/portal-sessions" style="display:block;margin-top:8px">All Portals</a>'
+      + '<a href="/approval-tasks" style="display:block;margin-top:6px">Approval Tasks</a>'
+      + '<a href="/gmail/alerts" style="display:block;margin-top:6px">Email Alerts</a>'
+      + '<a href="/gmail/status" style="display:block;margin-top:6px">Gmail Status</a>'
+      + '<a href="/daily-command-center" style="display:block;margin-top:6px">Full Dashboard JSON</a>'
+      + '<a href="/scanner" style="display:block;margin-top:6px">Scanner</a>'
+      + '<a href="/opportunities" style="display:block;margin-top:6px">Opportunities</a>'
+      + '<a href="/daily-brief" style="display:block;margin-top:6px">Daily Brief</a>'
+      + '<a href="/trigger-daily" style="display:block;margin-top:6px">Trigger Daily Scan</a>'
+      + '<a href="/gmail/scan" style="display:block;margin-top:6px">Scan Gmail Now</a>'
       + '</div>'
-      + '<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px">NOMYX AI v3.1 · Phase 14 · <a href="/" style="color:#aaa">API</a><br>No bid submission · No auto-posting · Stella approves all actions</p>'
+      + '<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px">NOMYX AI v3.2 - Phase 15 - <a href="/" style="color:#aaa">API</a><br>No bid submission - No auto-posting - Stella approves all actions</p>'
       + '</body></html>';
 
     res.setHeader('Content-Type', 'text/html');
     res.send(html);
   } catch(e) { res.status(500).send('<p>Error: ' + e.message + '</p>'); }
+});
+
+// ── PHASE 15: GMAIL SCAN + ALERT ROUTES ───────────────────────────────────
+
+app.get('/gmail/status', function(req, res) {
+  try {
+    var status = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : { error: 'Not loaded' };
+    res.json(status);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/gmail/scan', async function(req, res) {
+  try {
+    var oauthStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {};
+    if (oauthStatus.status !== 'CONNECTED') {
+      return res.json({
+        status: 'NOT_CONNECTED',
+        message: 'Gmail OAuth not configured. Run /auth/gmail to connect.',
+        oauthStatus: oauthStatus,
+        action: 'GET /auth/gmail then open URL in browser then allow then /auth/gmail/callback then add token to Railway'
+      });
+    }
+    var messages = await gmailOAuth.fetchBidAlertEmails({ maxResults: 50, onlyUnread: true });
+    var importResult = emailAlertParser.importEmailMessages ? emailAlertParser.importEmailMessages(messages) : { imported: 0 };
+    var loginNeededAlerts = (importResult.alerts || []).filter(function(a) { return a.portalLoginNeeded; });
+    var tasksCreated = 0;
+    for (var i = 0; i < loginNeededAlerts.length; i++) {
+      var a = loginNeededAlerts[i];
+      if (phoneApproval.requestPortalLogin && a.portalId) {
+        var portal = portalSessions.getSession ? portalSessions.getSession(a.portalId) : null;
+        if (portal && portal.sessionStatus !== 'Active') {
+          await phoneApproval.requestPortalLogin(a.portalId, a.source, portal.loginUrl, false).catch(function(){});
+          tasksCreated++;
+        }
+      }
+    }
+    res.json({
+      status: 'ok',
+      messagesFound: messages.length,
+      imported: importResult.imported,
+      duplicates: importResult.duplicates,
+      failed: importResult.failed,
+      loginApprovalTasksCreated: tasksCreated,
+      totalAlerts: emailAlertParser.getAlertSummary ? emailAlertParser.getAlertSummary() : {},
+      alerts: importResult.alerts || [],
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) {
+    console.error('[Gmail Scan]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/gmail/alerts', function(req, res) {
+  try {
+    var alerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var summary = emailAlertParser.getAlertSummary ? emailAlertParser.getAlertSummary() : {};
+    var gmailStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {};
+    res.json({
+      summary: summary,
+      gmailConnected: gmailStatus.status === 'CONNECTED',
+      gmailStatus: gmailStatus,
+      alerts: alerts,
+      sections: emailAlertParser.buildReportSections ? emailAlertParser.buildReportSections([], alerts) : {},
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/gmail/alerts/:id/verify', function(req, res) {
+  try {
+    var alert = emailAlertParser.updateAlertStatus ? emailAlertParser.updateAlertStatus(req.params.id, 'VERIFIED_REAL', req.body && req.body.notes) : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + req.params.id });
+    res.json({ success: true, alert: alert });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/gmail/alerts/:id/ignore', function(req, res) {
+  try {
+    var alert = emailAlertParser.updateAlertStatus ? emailAlertParser.updateAlertStatus(req.params.id, 'IGNORED', 'Ignored by Stella') : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + req.params.id });
+    res.json({ success: true, alert: alert });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PHASE 15: SCANNER + OPPORTUNITIES + SEARCH + INTEL ────────────────────
+
+app.get('/scanner', async function(req, res) {
+  try {
+    var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
+    var allBids = (scanResult && scanResult.allBids) ? scanResult.allBids : [];
+    var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var sections = emailAlertParser.buildReportSections ? emailAlertParser.buildReportSections(allBids, emailAlerts) : {};
+    res.json({
+      title: 'NOMYX AI Scanner - All Sources',
+      sources: ['SAM.gov API', 'BidNet Direct (email alerts)', 'NJSTART (email alerts)', 'SBA SubNet (manual)', 'NJ DPP', 'County/Municipal', 'School Districts', 'Hospital/Vendor'],
+      sections: sections,
+      totalBids: allBids.length,
+      totalEmailAlerts: emailAlerts.length,
+      portalStatus: portalSessions.getSummary ? portalSessions.getSummary() : {},
+      gmailStatus: gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {},
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/opportunities', async function(req, res) {
+  try {
+    var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
+    var allBids = (scanResult && scanResult.allBids) ? scanResult.allBids : [];
+    var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var verifiedReal = allBids.filter(function(b) { return b.verificationStatus === 'VERIFIED' && !b.isFake; });
+    var verifiedAlerts = emailAlerts.filter(function(a) { return a.verificationStatus === 'VERIFIED_REAL'; });
+    var allVerified = verifiedReal.concat(verifiedAlerts);
+    var urgent = allVerified.filter(function(b) { return b.deadlineDays != null && b.deadlineDays <= 14; });
+    var goBids = verifiedReal.filter(function(b) { return b.analysis && b.analysis.goNoGo === 'GO'; });
+    var emailAlertFound = emailAlerts.filter(function(a) { return a.verificationStatus === 'EMAIL_ALERT_FOUND'; });
+    res.json({
+      title: 'NOMYX Opportunities',
+      urgent: urgent,
+      goBids: goBids,
+      allVerified: allVerified,
+      emailAlertsNeedingVerification: emailAlertFound,
+      disclaimer: 'NOMYX AI does not submit bids. Stella reviews and submits directly via portal.',
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/search', async function(req, res) {
+  try {
+    var q = (req.query.q || '').toLowerCase().trim();
+    if (!q) return res.json({ error: 'Provide ?q=keyword to search', example: '/search?q=courier' });
+    var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
+    var allBids = (scanResult && scanResult.allBids) ? scanResult.allBids : [];
+    var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var matchedBids = allBids.filter(function(b) {
+      return ((b.title||'') + ' ' + (b.agency||'') + ' ' + (b.source||'')).toLowerCase().includes(q);
+    });
+    var matchedAlerts = emailAlerts.filter(function(a) {
+      return ((a.title||'') + ' ' + (a.agency||'') + ' ' + (a.source||'') + ' ' + (a.subject||'')).toLowerCase().includes(q);
+    });
+    res.json({ query: q, matchedBids: matchedBids.length, matchedAlerts: matchedAlerts.length, bids: matchedBids, alerts: matchedAlerts, timestamp: new Date().toISOString() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/intel', function(req, res) {
+  try {
+    var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var alertSummary = emailAlertParser.getAlertSummary ? emailAlertParser.getAlertSummary() : {};
+    var gmailStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {};
+    var sourceCount = {};
+    emailAlerts.forEach(function(a) { sourceCount[a.source] = (sourceCount[a.source] || 0) + 1; });
+    res.json({
+      title: 'NOMYX Intelligence Center',
+      emailAlertSummary: alertSummary,
+      gmailStatus: gmailStatus,
+      alertsBySource: sourceCount,
+      portalStatus: portalSessions.getSummary ? portalSessions.getSummary() : {},
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PHASE 15: FULL COMMAND CENTER (A-E SECTIONS) ───────────────────────────
+
+app.get('/command-center', async function(req, res) {
+  try {
+    var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
+    var allBids = (scanResult && scanResult.allBids) ? scanResult.allBids : [];
+    var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var sections = emailAlertParser.buildReportSections ? emailAlertParser.buildReportSections(allBids, emailAlerts) : {};
+    var portalsNeedingLogin = portalSessions.getPortalsNeedingLogin ? portalSessions.getPortalsNeedingLogin() : [];
+    var pendingTasks = phoneApproval.getPendingTasks ? phoneApproval.getPendingTasks() : [];
+    var gmailStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {};
+    var urgentVerified = (sections.A_VERIFIED_REAL || []).filter(function(b) {
+      return b.deadlineDays != null && b.deadlineDays <= 3 && !b.isFake;
+    });
+    res.json({
+      date: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
+      greeting: 'Good morning Stella! NOMYX Phase 15 Command Center.',
+      A_VERIFIED_REAL: sections.A_VERIFIED_REAL || [],
+      A_count: (sections.A_VERIFIED_REAL || []).length,
+      B_EMAIL_ALERTS_FOUND: sections.B_EMAIL_ALERTS_FOUND || [],
+      B_count: (sections.B_EMAIL_ALERTS_FOUND || []).length,
+      C_LOGIN_REQUIRED: portalsNeedingLogin,
+      C_count: portalsNeedingLogin.length,
+      D_SETUP_NEEDED: sections.D_SETUP_NEEDED || [],
+      D_count: (sections.D_SETUP_NEEDED || []).length,
+      gmailSetupNeeded: gmailStatus.status !== 'CONNECTED',
+      E_DO_NOT_ACT: sections.E_DO_NOT_ACT || [],
+      E_count: (sections.E_DO_NOT_ACT || []).length,
+      urgentVerified: urgentVerified,
+      urgentCount: urgentVerified.length,
+      loginApprovalsNeeded: portalsNeedingLogin.length,
+      pendingApprovals: pendingTasks.length,
+      gmailConnected: gmailStatus.status === 'CONNECTED',
+      gmailSetupUrl: gmailStatus.status !== 'CONNECTED' ? '/auth/gmail' : null,
+      links: {
+        scanner: '/scanner', opportunities: '/opportunities', search: '/search?q=courier',
+        intel: '/intel', gmailAlerts: '/gmail/alerts', gmailScan: '/gmail/scan',
+        gmailStatus: '/gmail/status', portalSessions: '/portal-sessions',
+        approvalTasks: '/approval-tasks', mobileView: '/m', sbaSubnet: '/scan-sba-subnet'
+      },
+      disclaimer: 'NOMYX AI does not submit bids, send outreach emails, spend money, or auto-post.',
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
