@@ -1,6 +1,6 @@
 /**
  * Phase 16.1 Tests -- Operator Layer Finish
- * 16 tests covering all Phase 16.1 requirements.
+ * 17 tests covering all Phase 16.1 requirements.
  *
  * TESTS COVER:
  * T01: BidNet loginUrl is home page only (no idp.bidnetdirect.com)
@@ -19,6 +19,7 @@
  * T14: No outreach auto-send (outreachSent=false, no sendEmail)
  * T15: No Stella Bella references in Phase 16.1 files
  * T16: Mobile /m page -- Gmail not duplicated (gmailCard separate from portalCards)
+ * T17: /health version is 3.4 + Phase 16.1 (no stale v3.2 / Phase 15 strings)
  */
 
 'use strict';
@@ -294,7 +295,26 @@ test('T16: server.js portalCards filter excludes Gmail id to prevent duplicate d
   assert.ok(src.includes('NOMYX AI does NOT send outreach automatically'), 'Draft outreach must disclaim no auto-send');
 });
 
-// ── RESULTS ────────────────────────────────────────────────────────────────────
+// T17: /health version string must say 3.4 and Phase 16.1 -- never v3.2 or Phase 15
+test('T17: server.js /health endpoint reports version 3.4 and Phase 16.1', function() {
+  var fs = require('fs');
+  var path = require('path');
+  var src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Must have correct version in health route
+  assert.ok(src.includes("version: '3.4'"), 'health must report version 3.4');
+  assert.ok(src.includes("phase: 'Phase 16.1"), 'health must report Phase 16.1');
+  // Must NOT have stale version strings in non-comment lines
+  var lines = src.split('\n');
+  lines.forEach(function(line, i) {
+    var stripped = line.replace(/\/\/.*$/, '').trim();
+    assert.ok(!stripped.includes("version: '3.2'"), 'stale v3.2 found at line ' + (i+1));
+    assert.ok(!stripped.includes("version: '3.0'"), 'stale v3.0 found at line ' + (i+1));
+    assert.ok(!stripped.includes("version: '3.1'"), 'stale v3.1 found at line ' + (i+1));
+    assert.ok(!(stripped.includes("phase: '") && stripped.includes('Phase 15')), 'stale Phase 15 found at line ' + (i+1));
+  });
+});
+
+// -- RESULTS ------------------------------------------------------------------
 
 console.log('\n=======================================================');
 console.log('Phase 16.1 Test Results: ' + passed + ' passed, ' + failed + ' failed');

@@ -83,7 +83,7 @@ app.get('/', (req, res) => res.json({
   owner: 'Stella',
   naics: ['488510 - Freight Transportation Arrangement', '492110 - Couriers & Messengers'],
   serviceArea: 'NJ & PA',
-  version: '3.0',
+  version: '3.4',
   endpoints: {
     dashboard: '/daily-brief',
     bidScan: '/scan-bids',
@@ -313,8 +313,8 @@ app.get('/trigger-daily', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
-    version: '3.2',
-    phase: 'Phase 15 - Gmail OAuth + Email Alert Ingestion',
+    version: '3.4',
+    phase: 'Phase 16.1 - BidNet Stale Fix + Gmail Dedup + Canonical Alerts',
     timestamp: new Date().toISOString(),
     env: {
       NOTIFY_EMAIL: process.env.NOTIFY_EMAIL || '[MISSING] missing',
