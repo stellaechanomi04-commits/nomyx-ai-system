@@ -50,6 +50,9 @@ const sessionWorker  = load('./modules/session-worker');
 const gmailOAuth       = load('./modules/gmail-oauth');
 const emailAlertParser = load('./modules/email-alert-parser');
 
+// -- PHASE 16: Alert Verification + Opportunity Pipeline -------------------
+const opportunityPipeline = load('./modules/opportunity-pipeline');
+
 // -- CRON JOBS --------------------------------------------------------------
 try {
   const cron = require('node-cron');
@@ -574,15 +577,23 @@ app.get('/m', async (req, res) => {
     const portals = portalSessions.getAllSessions ? portalSessions.getAllSessions() : [];
     const portalsNeedingLogin = portalSessions.getPortalsNeedingLogin ? portalSessions.getPortalsNeedingLogin() : [];
     const pendingTasks = phoneApproval.getPendingTasks ? phoneApproval.getPendingTasks() : [];
-    // Phase 15: email alerts
     const emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
-    const newAlerts = emailAlerts.filter(function(a) { return a.verificationStatus === 'EMAIL_ALERT_FOUND'; });
-    const alertSummary = emailAlertParser.getAlertSummary ? emailAlertParser.getAlertSummary() : { total: 0 };
     const gmailStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : { status: 'NOT_CONNECTED' };
+    var gmailConnected = gmailStatus.status === 'CONNECTED';
 
+    // -- Phase 16: dedup + classify alerts ------------------------------------
+    var dedupResult = opportunityPipeline.deduplicateAlerts ? opportunityPipeline.deduplicateAlerts(emailAlerts) : { canonical: emailAlerts, duplicates: [] };
+    var canonicalAlerts = dedupResult.canonical || emailAlerts;
+    var newAlerts = canonicalAlerts.filter(function(a) { return a.verificationStatus === 'EMAIL_ALERT_FOUND' || a.verificationStatus === 'NEEDS_LOGIN_VERIFICATION' || a.verificationStatus === 'PUBLIC_SOURCE_FOUND'; });
+    var loginNeededAlerts = canonicalAlerts.filter(function(a) { return a.portalLoginNeeded && a.verificationStatus !== 'IGNORED' && a.verificationStatus !== 'DUPLICATE'; });
+    var verifiedRealAlerts = canonicalAlerts.filter(function(a) { return a.verificationStatus === 'VERIFIED_REAL'; });
+    var topOpp = opportunityPipeline.topOpportunity ? opportunityPipeline.topOpportunity(canonicalAlerts) : null;
+    var nextAction = opportunityPipeline.nextMoneyAction ? opportunityPipeline.nextMoneyAction(canonicalAlerts) : '';
+
+    // -- Portal cards (Phase 16: Gmail card fixed to show OAuth status) -------
     var portalCards = portals.slice(0, 6).map(function(p) {
-      var color = p.sessionStatus === 'Active' ? '#28a745' : p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' ? '#dc3545' : '#6c757d';
-      var dot = p.sessionStatus === 'Active' ? 'O' : p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' ? 'X' : '-';
+      var color = p.sessionStatus === 'Active' ? '#28a745' : (p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required') ? '#dc3545' : '#6c757d';
+      var dot = p.sessionStatus === 'Active' ? 'O' : (p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required') ? 'X' : '-';
       return '<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">'
         + '<div><strong style="font-size:13px">' + p.name + '</strong><br><span style="color:' + color + ';font-size:12px">' + dot + ' ' + p.sessionStatus + '</span></div>'
         + '<div style="text-align:right;font-size:12px">'
@@ -592,8 +603,20 @@ app.get('/m', async (req, res) => {
         + '</div></div>';
     }).join('');
 
-    // Phase 15: Email alert section for /m
-    var gmailConnected = gmailStatus.status === 'CONNECTED';
+    // Phase 16: Gmail portal card — shows real OAuth status, NOT "Not Configured"
+    var gmailCard = '<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">'
+      + '<div><strong style="font-size:13px">Gmail (Bid Alert Ingestion)</strong><br>'
+      + (gmailConnected
+          ? '<span style="color:#28a745;font-size:12px">O Connected | Scope: gmail.readonly | No password stored</span>'
+          : '<span style="color:#dc3545;font-size:12px">X Not Connected</span>')
+      + '</div>'
+      + '<div style="text-align:right;font-size:12px">'
+      + (gmailConnected
+          ? '<span style="color:#28a745">Active</span>'
+          : '<a href="/auth/gmail" style="color:#1d3557;display:block">Connect</a>')
+      + '</div></div>';
+
+    // -- Gmail setup banner --------------------------------------------------
     var gmailSetupBanner = !gmailConnected
       ? '<div style="background:#e8f4fd;border:1px solid #17a2b8;padding:12px;border-radius:8px;margin-bottom:12px;font-size:13px">'
         + '<strong>Email Alerts Not Connected</strong><br>'
@@ -601,27 +624,77 @@ app.get('/m', async (req, res) => {
         + '<a href="/auth/gmail" style="color:#17a2b8;font-size:12px;display:inline-block;margin-top:6px">Connect Gmail</a>'
         + '</div>'
       : '';
+
+    // -- Top opportunity banner (Phase 16) ------------------------------------
+    var topOppBanner = (topOpp && topOpp.alert)
+      ? (function() {
+          var a = topOpp.alert;
+          var g = topOpp.goNoGo;
+          var tierColor = g.tier === 'GO' ? '#28a745' : g.tier === 'MAYBE' ? '#ffc107' : '#6c757d';
+          var portalBtn = '';
+          if (a.portalId === 'bidnetDirect') portalBtn = '<a href="https://www.bidnetdirect.com" style="font-size:12px;background:#1d3557;color:white;padding:6px 10px;border-radius:4px;display:inline-block;margin-top:8px">Open BidNet Direct</a> ';
+          if (a.portalId === 'njstart')      portalBtn = '<a href="https://www.njstart.gov" style="font-size:12px;background:#1d3557;color:white;padding:6px 10px;border-radius:4px;display:inline-block;margin-top:8px">Open NJSTART</a> ';
+          if (a.portalId === 'sbaSubnet')    portalBtn = '<a href="https://eweb1.sba.gov/subnet" style="font-size:12px;background:#1d3557;color:white;padding:6px 10px;border-radius:4px;display:inline-block;margin-top:8px">Open SBA SubNet</a> ';
+          return '<div style="background:#e8f9e8;border:2px solid ' + tierColor + ';border-radius:8px;padding:14px;margin-bottom:14px">'
+            + '<div style="font-size:11px;color:' + tierColor + ';font-weight:bold;text-transform:uppercase">Top Opportunity | ' + g.tier + ' | Score: ' + g.score + '/100</div>'
+            + '<strong style="font-size:14px">' + (a.title || 'Opportunity') + '</strong><br>'
+            + '<span style="font-size:12px;color:#555">' + (a.source || '') + ' | ' + (a.location || '') + '</span><br>'
+            + '<span style="font-size:12px;color:#333;display:block;margin-top:6px">' + (g.recommendedAction || '') + '</span>'
+            + portalBtn
+            + '<a href="/opportunities/score?alertId=' + a.id + '" style="font-size:12px;color:#555;display:inline-block;margin-top:8px">Full Score Breakdown</a>'
+            + '</div>';
+        })()
+      : '';
+
+    // -- Next money action banner (Phase 16) ----------------------------------
+    var nextMoneyBanner = nextAction
+      ? '<div style="background:#fff3cd;border:1px solid #ffc107;padding:12px;border-radius:8px;margin-bottom:14px;font-size:13px">'
+        + '<strong>Next Money Action</strong><br>'
+        + '<span style="color:#333">' + nextAction + '</span>'
+        + '</div>'
+      : '';
+
+    // -- Email alert section with Phase 16 action buttons --------------------
     var emailAlertSection = newAlerts.length > 0
       ? '<h2>New Email Alerts (' + newAlerts.length + ')</h2>'
         + newAlerts.slice(0, 5).map(function(a) {
+            var goNoGo = opportunityPipeline.scoreOpportunity ? opportunityPipeline.scoreOpportunity(a) : null;
+            var scoreChip = goNoGo ? '<span style="font-size:11px;background:' + (goNoGo.tier === 'GO' ? '#28a745' : goNoGo.tier === 'MAYBE' ? '#ffc107' : '#6c757d') + ';color:' + (goNoGo.tier === 'MAYBE' ? '#333' : 'white') + ';padding:2px 6px;border-radius:4px;margin-left:4px">' + goNoGo.tier + ' ' + goNoGo.score + '</span>' : '';
+            var portalBtn = '';
+            if (a.portalId === 'bidnetDirect') portalBtn = '<a href="https://www.bidnetdirect.com" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open BidNet</a> ';
+            if (a.portalId === 'njstart')      portalBtn = '<a href="https://www.njstart.gov" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open NJSTART</a> ';
+            if (a.portalId === 'sbaSubnet')    portalBtn = '<a href="https://eweb1.sba.gov/subnet" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open SBA SubNet</a> ';
             return '<div style="border:1px solid #17a2b8;border-left:4px solid #17a2b8;border-radius:8px;padding:12px;margin-bottom:8px">'
-              + '<strong style="font-size:13px">' + (a.title || 'Untitled Alert') + '</strong><br>'
+              + '<strong style="font-size:13px">' + (a.title || 'Untitled Alert') + '</strong>' + scoreChip + '<br>'
               + '<span style="color:#666;font-size:12px">' + (a.source || '') + ' | ' + (a.agency || '') + '</span><br>'
               + '<span style="color:#17a2b8;font-size:12px">Deadline: ' + (a.deadlineDisplay || 'Deadline not verified') + '</span><br>'
-              + '<div style="display:flex;gap:8px;margin-top:8px">'
-              + (a.url ? '<a href="' + a.url + '" style="font-size:11px;color:#1d3557;background:#e8f4fd;padding:4px 8px;border-radius:4px">View</a>' : '')
-              + '<a href="/gmail/alerts/' + a.id + '/ignore" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#666;background:#eee;padding:4px 8px;border-radius:4px">Ignore</a>'
+              + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">'
+              + portalBtn
+              + '<a href="/opportunities/import/' + a.id + '" onclick="fetch(this.href,{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.success?\'Added to opportunities!\':(d.error||\'Error\'));if(d.success)location.reload();});return false;" style="font-size:11px;color:white;background:#28a745;padding:4px 8px;border-radius:4px">Add to Opportunities</a>'
+              + '<a href="/gmail/alerts/' + a.id + '/no-action" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#666;background:#eee;padding:4px 8px;border-radius:4px">Mark No Action</a>'
+              + '<a href="/gmail/alerts/' + a.id + '/ignore" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#999;background:#f5f5f5;padding:4px 8px;border-radius:4px">Ignore</a>'
               + '</div></div>';
           }).join('')
-      : gmailConnected
-        ? '<h2>Email Alerts</h2><div style="background:#d4edda;padding:12px;border-radius:8px;color:#155724;font-size:13px">No new email alerts</div>'
-        : '';
+      : (gmailConnected
+          ? '<h2>Email Alerts</h2><div style="background:#d4edda;padding:12px;border-radius:8px;color:#155724;font-size:13px">No new email alerts. <a href="/gmail/scan" style="color:#155724;text-decoration:underline">Scan now</a></div>'
+          : '');
 
-    var statusColor = '#28a745';
+    // -- Verified real alerts section ----------------------------------------
+    var verifiedSection = verifiedRealAlerts.length > 0
+      ? '<h2>Verified Real Opportunities (' + verifiedRealAlerts.length + ')</h2>'
+        + verifiedRealAlerts.map(function(a) {
+            return '<div style="border:2px solid #28a745;border-radius:8px;padding:12px;margin-bottom:8px">'
+              + '<strong style="font-size:13px">' + (a.title || '') + '</strong><br>'
+              + '<span style="font-size:12px;color:#555">' + (a.source || '') + ' | ' + (a.deadlineDisplay || 'Deadline not verified') + '</span><br>'
+              + (a.url ? '<a href="' + a.url + '" style="font-size:12px;color:#1d3557">View Opportunity</a>' : '')
+              + '</div>';
+          }).join('')
+      : '';
+
     var statusMsg = 'All Systems Scanning';
-    if (portalsNeedingLogin.length > 0) { statusColor = '#dc3545'; statusMsg = portalsNeedingLogin.length + ' Portal(s) Need Login'; }
-    else if (pendingTasks.length > 0) { statusColor = '#ffc107'; statusMsg = pendingTasks.length + ' Action(s) Pending'; }
-    else if (newAlerts.length > 0) { statusColor = '#17a2b8'; statusMsg = newAlerts.length + ' New Email Alert(s)'; }
+    if (portalsNeedingLogin.length > 0) statusMsg = portalsNeedingLogin.length + ' Portal(s) Need Login';
+    else if (pendingTasks.length > 0) statusMsg = pendingTasks.length + ' Action(s) Pending';
+    else if (newAlerts.length > 0) statusMsg = newAlerts.length + ' New Email Alert(s)';
 
     var loginBanner = portalsNeedingLogin.length > 0
       ? '<div style="background:#dc3545;color:white;padding:16px;border-radius:8px;margin-bottom:14px">'
@@ -682,10 +755,14 @@ app.get('/m', async (req, res) => {
       + loginBanner
       + taskBanner
       + gmailSetupBanner
+      + topOppBanner
+      + nextMoneyBanner
       + '<h2>Urgent Verified Bids (' + urgentBids.length + ')</h2>'
       + bidCards
+      + verifiedSection
       + '<h2>Portal Sessions</h2>'
       + portalCards
+      + gmailCard
       + emailAlertSection
       + '<div style="margin-top:16px;padding:14px;background:white;border-radius:8px;font-size:13px">'
       + '<strong>Quick Links</strong><br>'
@@ -693,14 +770,15 @@ app.get('/m', async (req, res) => {
       + '<a href="/approval-tasks" style="display:block;margin-top:6px">Approval Tasks</a>'
       + '<a href="/gmail/alerts" style="display:block;margin-top:6px">Email Alerts</a>'
       + '<a href="/gmail/status" style="display:block;margin-top:6px">Gmail Status</a>'
+      + '<a href="/opportunities" style="display:block;margin-top:6px">Opportunities</a>'
+      + '<a href="/opportunities/pipeline" style="display:block;margin-top:6px">Opportunity Pipeline</a>'
       + '<a href="/daily-command-center" style="display:block;margin-top:6px">Full Dashboard JSON</a>'
       + '<a href="/scanner" style="display:block;margin-top:6px">Scanner</a>'
-      + '<a href="/opportunities" style="display:block;margin-top:6px">Opportunities</a>'
       + '<a href="/daily-brief" style="display:block;margin-top:6px">Daily Brief</a>'
       + '<a href="/trigger-daily" style="display:block;margin-top:6px">Trigger Daily Scan</a>'
       + '<a href="/gmail/scan" style="display:block;margin-top:6px">Scan Gmail Now</a>'
       + '</div>'
-      + '<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px">NOMYX AI v3.2 - Phase 15 - <a href="/" style="color:#aaa">API</a><br>No bid submission - No auto-posting - Stella approves all actions</p>'
+      + '<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px">NOMYX AI v3.3 - Phase 16 - <a href="/" style="color:#aaa">API</a><br>No bid submission - No auto-posting - Stella approves all actions</p>'
       + '</body></html>';
 
     res.setHeader('Content-Type', 'text/html');
@@ -791,7 +869,96 @@ app.post('/gmail/alerts/:id/ignore', function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// -- PHASE 15: SCANNER + OPPORTUNITIES + SEARCH + INTEL --------------------
+app.post('/gmail/alerts/:id/no-action', function(req, res) {
+  try {
+    var alert = emailAlertParser.updateAlertStatus ? emailAlertParser.updateAlertStatus(req.params.id, 'NO_ACTION', 'Marked No Action by Stella') : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + req.params.id });
+    res.json({ success: true, alert: alert });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// -- PHASE 16: Alert Verification + Opportunity Pipeline -------------------
+
+app.post('/alerts/deduplicate', function(req, res) {
+  try {
+    var alerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var result = opportunityPipeline.deduplicateAlerts ? opportunityPipeline.deduplicateAlerts(alerts) : { canonical: alerts, duplicates: [], dupCount: 0, uniqueCount: alerts.length };
+    var markedCount = 0;
+    (result.duplicates || []).forEach(function(dup) {
+      if (emailAlertParser.updateAlertStatus && dup.verificationStatus !== 'DUPLICATE') {
+        emailAlertParser.updateAlertStatus(dup.id, 'DUPLICATE', 'Auto-marked duplicate of canonical alert with same source/title/location');
+        markedCount++;
+      }
+    });
+    res.json({
+      status: 'ok',
+      totalAlerts: alerts.length,
+      uniqueCanonical: result.uniqueCount,
+      duplicatesFound: result.dupCount,
+      duplicatesMarked: markedCount,
+      canonical: (result.canonical || []).map(function(a) { return { id: a.id, source: a.source, title: a.title, receivedDate: a.receivedDate, verificationStatus: a.verificationStatus }; }),
+      duplicates: (result.duplicates || []).map(function(a) { return { id: a.id, source: a.source, title: a.title, receivedDate: a.receivedDate }; }),
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/opportunities/import/:alertId', function(req, res) {
+  try {
+    var alert = emailAlertParser.getAlertById ? emailAlertParser.getAlertById(req.params.alertId) : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + req.params.alertId });
+    var result = opportunityPipeline.importAlertToOpportunity ? opportunityPipeline.importAlertToOpportunity(alert) : { error: 'Pipeline not loaded' };
+    if (result.error) return res.status(400).json(result);
+    res.json({ success: true, opportunity: result.opportunity });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/opportunities/score', function(req, res) {
+  try {
+    var alertId = req.query.alertId;
+    if (!alertId) return res.status(400).json({ error: 'Provide ?alertId=...' });
+    var alert = emailAlertParser.getAlertById ? emailAlertParser.getAlertById(alertId) : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + alertId });
+    var score = opportunityPipeline.scoreOpportunity ? opportunityPipeline.scoreOpportunity(alert) : null;
+    res.json({ alertId: alertId, title: alert.title, source: alert.source, score: score, alert: alert, timestamp: new Date().toISOString() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/opportunities/pipeline', function(req, res) {
+  try {
+    var alerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
+    var dedupResult = opportunityPipeline.deduplicateAlerts ? opportunityPipeline.deduplicateAlerts(alerts) : { canonical: alerts, duplicates: [], dupCount: 0, uniqueCount: alerts.length };
+    var canonical = dedupResult.canonical || alerts;
+    var topOpp = opportunityPipeline.topOpportunity ? opportunityPipeline.topOpportunity(canonical) : null;
+    var nextAction = opportunityPipeline.nextMoneyAction ? opportunityPipeline.nextMoneyAction(canonical) : '';
+    var importedOpps = opportunityPipeline.getOpportunities ? opportunityPipeline.getOpportunities() : [];
+    var scored = canonical.map(function(a) {
+      var g = opportunityPipeline.scoreOpportunity ? opportunityPipeline.scoreOpportunity(a) : null;
+      return { id: a.id, source: a.source, title: a.title, location: a.location, verificationStatus: a.verificationStatus, deadlineDisplay: a.deadlineDisplay, portalLoginNeeded: a.portalLoginNeeded, goNoGo: g };
+    }).sort(function(a, b) { return ((b.goNoGo && b.goNoGo.score) || 0) - ((a.goNoGo && a.goNoGo.score) || 0); });
+    var byBidNet = canonical.filter(function(a) { return a.portalId === 'bidnetDirect'; });
+    var byNJSTART = canonical.filter(function(a) { return a.portalId === 'njstart'; });
+    var bySBA = canonical.filter(function(a) { return a.portalId === 'sbaSubnet'; });
+    var loginNeeded = canonical.filter(function(a) { return a.portalLoginNeeded && a.verificationStatus !== 'IGNORED' && a.verificationStatus !== 'DUPLICATE'; });
+    var verifiedReal = canonical.filter(function(a) { return a.verificationStatus === 'VERIFIED_REAL'; });
+    res.json({
+      title: 'NOMYX Opportunity Pipeline -- Phase 16',
+      summary: { totalAlerts: alerts.length, uniqueCanonical: dedupResult.uniqueCount, duplicates: dedupResult.dupCount, needingLogin: loginNeeded.length, verifiedReal: verifiedReal.length, importedOpportunities: importedOpps.length },
+      nextMoneyAction: nextAction,
+      topOpportunity: topOpp ? { title: topOpp.alert.title, source: topOpp.alert.source, tier: topOpp.goNoGo.tier, score: topOpp.goNoGo.score, recommendedAction: topOpp.goNoGo.recommendedAction } : null,
+      bySource: { bidnetDirect: byBidNet.length, njstart: byNJSTART.length, sbaSubnet: bySBA.length },
+      loginRequired: loginNeeded.map(function(a) { return { id: a.id, source: a.source, title: a.title }; }),
+      verifiedReal: verifiedReal,
+      scoredAlerts: scored,
+      importedOpportunities: importedOpps,
+      duplicateAlerts: (dedupResult.duplicates || []).map(function(a) { return { id: a.id, source: a.source, title: a.title, receivedDate: a.receivedDate }; }),
+      disclaimer: 'NOMYX AI does not submit bids, send outreach emails, spend money, or auto-post. Stella approves all actions.',
+      timestamp: new Date().toISOString()
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// -- PHASE 15+16: SCANNER + SEARCH + INTEL ----------------------------------
 
 app.get('/scanner', async function(req, res) {
   try {
@@ -801,35 +968,12 @@ app.get('/scanner', async function(req, res) {
     var sections = emailAlertParser.buildReportSections ? emailAlertParser.buildReportSections(allBids, emailAlerts) : {};
     res.json({
       title: 'NOMYX AI Scanner - All Sources',
-      sources: ['SAM.gov API', 'BidNet Direct (email alerts)', 'NJSTART (email alerts)', 'SBA SubNet (manual)', 'NJ DPP', 'County/Municipal', 'School Districts', 'Hospital/Vendor'],
+      sources: ['SAM.gov API', 'BidNet Direct (email alerts)', 'NJSTART (email alerts)', 'SBA SubNet (manual)', 'NJ DPP', 'County/Municipal'],
       sections: sections,
       totalBids: allBids.length,
       totalEmailAlerts: emailAlerts.length,
       portalStatus: portalSessions.getSummary ? portalSessions.getSummary() : {},
       gmailStatus: gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {},
-      timestamp: new Date().toISOString()
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/opportunities', async function(req, res) {
-  try {
-    var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
-    var allBids = (scanResult && scanResult.allBids) ? scanResult.allBids : [];
-    var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
-    var verifiedReal = allBids.filter(function(b) { return b.verificationStatus === 'VERIFIED' && !b.isFake; });
-    var verifiedAlerts = emailAlerts.filter(function(a) { return a.verificationStatus === 'VERIFIED_REAL'; });
-    var allVerified = verifiedReal.concat(verifiedAlerts);
-    var urgent = allVerified.filter(function(b) { return b.deadlineDays != null && b.deadlineDays <= 14; });
-    var goBids = verifiedReal.filter(function(b) { return b.analysis && b.analysis.goNoGo === 'GO'; });
-    var emailAlertFound = emailAlerts.filter(function(a) { return a.verificationStatus === 'EMAIL_ALERT_FOUND'; });
-    res.json({
-      title: 'NOMYX Opportunities',
-      urgent: urgent,
-      goBids: goBids,
-      allVerified: allVerified,
-      emailAlertsNeedingVerification: emailAlertFound,
-      disclaimer: 'NOMYX AI does not submit bids. Stella reviews and submits directly via portal.',
       timestamp: new Date().toISOString()
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -842,12 +986,8 @@ app.get('/search', async function(req, res) {
     var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
     var allBids = (scanResult && scanResult.allBids) ? scanResult.allBids : [];
     var emailAlerts = emailAlertParser.getAlerts ? emailAlertParser.getAlerts() : [];
-    var matchedBids = allBids.filter(function(b) {
-      return ((b.title||'') + ' ' + (b.agency||'') + ' ' + (b.source||'')).toLowerCase().includes(q);
-    });
-    var matchedAlerts = emailAlerts.filter(function(a) {
-      return ((a.title||'') + ' ' + (a.agency||'') + ' ' + (a.source||'') + ' ' + (a.subject||'')).toLowerCase().includes(q);
-    });
+    var matchedBids = allBids.filter(function(b) { return ((b.title||'') + ' ' + (b.agency||'') + ' ' + (b.source||'')).toLowerCase().includes(q); });
+    var matchedAlerts = emailAlerts.filter(function(a) { return ((a.title||'') + ' ' + (a.agency||'') + ' ' + (a.source||'') + ' ' + (a.subject||'')).toLowerCase().includes(q); });
     res.json({ query: q, matchedBids: matchedBids.length, matchedAlerts: matchedAlerts.length, bids: matchedBids, alerts: matchedAlerts, timestamp: new Date().toISOString() });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -870,8 +1010,6 @@ app.get('/intel', function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// -- PHASE 15: FULL COMMAND CENTER (A-E SECTIONS) ---------------------------
-
 app.get('/command-center', async function(req, res) {
   try {
     var scanResult = await bidScanner.scanAll().catch(function() { return { allBids: [] }; });
@@ -881,37 +1019,45 @@ app.get('/command-center', async function(req, res) {
     var portalsNeedingLogin = portalSessions.getPortalsNeedingLogin ? portalSessions.getPortalsNeedingLogin() : [];
     var pendingTasks = phoneApproval.getPendingTasks ? phoneApproval.getPendingTasks() : [];
     var gmailStatus = gmailOAuth.getOAuthStatus ? gmailOAuth.getOAuthStatus() : {};
+    var importedOpps = opportunityPipeline.getOpportunities ? opportunityPipeline.getOpportunities() : [];
+    var topOpp = opportunityPipeline.topOpportunity ? opportunityPipeline.topOpportunity(sections.A_VERIFIED_REAL || []) : null;
+    var nextAction = opportunityPipeline.nextMoneyAction ? opportunityPipeline.nextMoneyAction(emailAlerts) : '';
     var urgentVerified = (sections.A_VERIFIED_REAL || []).filter(function(b) {
-      return b.deadlineDays != null && b.deadlineDays <= 3 && !b.isFake;
+      return b.deadlineDays != null && typeof b.deadlineDays === 'number' && b.deadlineDays <= 3 && !b.isFake;
     });
     res.json({
       date: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
-      greeting: 'Good morning Stella! NOMYX Phase 15 Command Center.',
+      greeting: 'Good morning Stella! NOMYX Phase 16 Command Center.',
       A_VERIFIED_REAL: sections.A_VERIFIED_REAL || [],
       A_count: (sections.A_VERIFIED_REAL || []).length,
       B_EMAIL_ALERTS_FOUND: sections.B_EMAIL_ALERTS_FOUND || [],
       B_count: (sections.B_EMAIL_ALERTS_FOUND || []).length,
       C_LOGIN_REQUIRED: portalsNeedingLogin,
       C_count: portalsNeedingLogin.length,
-      D_SETUP_NEEDED: sections.D_SETUP_NEEDED || [],
-      D_count: (sections.D_SETUP_NEEDED || []).length,
+      D_NO_ACTION_DUPLICATES: sections.E_DO_NOT_ACT || [],
+      D_count: (sections.E_DO_NOT_ACT || []).length,
+      E_SETUP_NEEDED: sections.D_SETUP_NEEDED || [],
+      E_count: (sections.D_SETUP_NEEDED || []).length,
       gmailSetupNeeded: gmailStatus.status !== 'CONNECTED',
-      E_DO_NOT_ACT: sections.E_DO_NOT_ACT || [],
-      E_count: (sections.E_DO_NOT_ACT || []).length,
       urgentVerified: urgentVerified,
       urgentCount: urgentVerified.length,
       loginApprovalsNeeded: portalsNeedingLogin.length,
       pendingApprovals: pendingTasks.length,
       gmailConnected: gmailStatus.status === 'CONNECTED',
-      gmailSetupUrl: gmailStatus.status !== 'CONNECTED' ? '/auth/gmail' : null,
+      nextMoneyAction: nextAction,
+      topOpportunity: topOpp ? { title: topOpp.alert && topOpp.alert.title, tier: topOpp.goNoGo && topOpp.goNoGo.tier, score: topOpp.goNoGo && topOpp.goNoGo.score } : null,
+      importedOpportunities: importedOpps.length,
       links: {
-        scanner: '/scanner', opportunities: '/opportunities', search: '/search?q=courier',
-        intel: '/intel', gmailAlerts: '/gmail/alerts', gmailScan: '/gmail/scan',
-        gmailStatus: '/gmail/status', portalSessions: '/portal-sessions',
-        approvalTasks: '/approval-tasks', mobileView: '/m', sbaSubnet: '/scan-sba-subnet'
+        scanner: '/scanner', opportunities: '/opportunities', opportunitiesPipeline: '/opportunities/pipeline',
+        search: '/search?q=courier', intel: '/intel', gmailAlerts: '/gmail/alerts',
+        gmailScan: '/gmail/scan', gmailStatus: '/gmail/status', portalSessions: '/portal-sessions',
+        approvalTasks: '/approval-tasks', mobileView: '/m', dedup: '/alerts/deduplicate'
       },
-      disclaimer: 'NOMYX AI does not submit bids, send outreach emails, spend money, or auto-post.',
+      disclaimer: 'NOMYX AI does not submit bids, send outreach emails, spend money, or auto-post. Stella approves all actions.',
       timestamp: new Date().toISOString()
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// -- SERVER LISTEN -----------------------------------------------------------
+

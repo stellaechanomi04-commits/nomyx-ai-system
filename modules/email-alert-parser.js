@@ -181,13 +181,44 @@ function clearAlerts() { alertStore = []; importedMessageIds = new Set(); }
 
 function getAlertById(id) { return alertStore.find(function(a) { return a.id === id; }) || null; }
 
-function updateAlertStatus(id, status, notes) {
+// ALLOWED_STATUS_TRANSITIONS: guards against unverified auto-promotion
+var ALLOWED_STATUS_TRANSITIONS = {
+  EMAIL_ALERT_FOUND: ['LOGIN_REQUIRED', 'IGNORED', 'DUPLICATE', 'NEEDS_LOGIN_VERIFICATION', 'PUBLIC_SOURCE_FOUND', 'EMAIL_ALERT_FOUND'],
+  LOGIN_REQUIRED:    ['VERIFIED_REAL', 'IGNORED', 'DUPLICATE', 'NO_ACTION', 'EXPIRED', 'LOGIN_REQUIRED'],
+  PUBLIC_SOURCE_FOUND: ['VERIFIED_REAL', 'IGNORED', 'NO_ACTION', 'EXPIRED', 'PUBLIC_SOURCE_FOUND'],
+  NEEDS_LOGIN_VERIFICATION: ['LOGIN_REQUIRED', 'IGNORED', 'NEEDS_LOGIN_VERIFICATION'],
+  VERIFIED_REAL:     ['IGNORED', 'VERIFIED_REAL'],  // Cannot go backwards to EMAIL_ALERT_FOUND
+  IGNORED:           ['EMAIL_ALERT_FOUND', 'IGNORED'],
+  DUPLICATE:         ['IGNORED', 'DUPLICATE'],
+  NO_ACTION:         ['EMAIL_ALERT_FOUND', 'IGNORED', 'NO_ACTION'],
+  EXPIRED:           ['IGNORED', 'EXPIRED']
+};
+
+function updateAlertStatus(id, newStatus, notes) {
   var alert = alertStore.find(function(a) { return a.id === id; });
   if (!alert) return null;
-  alert.verificationStatus = status;
+
+  // Guard: VERIFIED_REAL requires explicit portal confirmation — cannot jump from EMAIL_ALERT_FOUND
+  if (newStatus === ALERT_STATUS.VERIFIED_REAL) {
+    var currentStatus = alert.verificationStatus;
+    var allowed = ALLOWED_STATUS_TRANSITIONS[currentStatus] || [];
+    if (!allowed.includes('VERIFIED_REAL')) {
+      return {
+        error: 'Cannot set VERIFIED_REAL from status: ' + currentStatus + '. Alert must first be verified via portal login (LOGIN_REQUIRED -> VERIFIED_REAL) or public source (PUBLIC_SOURCE_FOUND -> VERIFIED_REAL).',
+        currentStatus: currentStatus,
+        requiresVerificationVia: 'Portal login or confirmed public source link'
+      };
+    }
+  }
+
+  alert.verificationStatus = newStatus;
   alert.notes = notes || alert.notes;
   alert.updatedAt = new Date().toISOString();
   return alert;
+}
+
+function getAlertsByStatus(status) {
+  return alertStore.filter(function(a) { return a.verificationStatus === status; });
 }
 
 // ── DEDUPLICATION ─────────────────────────────────────────────────────────────
@@ -341,66 +372,70 @@ function buildReportSections(scanBids, emailAlerts) {
 
   // Scan bids
   scanBids.forEach(function(b) {
-    if (b.isFake)                                         doNotAct.push({ ...b, _section: 'DO_NOT_ACT' });
-    else if (b.verificationStatus === 'VERIFIED')         verifiedReal.push({ ...b, _section: 'VERIFIED_REAL' });
-    else if (b.verificationStatus === 'LOGIN_REQUIRED')   loginRequired.push({ ...b, _section: 'LOGIN_REQUIRED' });
-    else if (b.verificationStatus === 'SETUP_NEEDED')     setupNeeded.push({ ...b, _section: 'SETUP_NEEDED' });
-    else                                                   emailFound.push({ ...b, _section: 'NEEDS_VERIFICATION' });
+    var bCopy = Object.assign({}, b);
+    if (b.isFake)                                       { bCopy._section = 'DO_NOT_ACT';        doNotAct.push(bCopy); }
+    else if (b.verificationStatus === 'VERIFIED')       { bCopy._section = 'VERIFIED_REAL';     verifiedReal.push(bCopy); }
+    else if (b.verificationStatus === 'LOGIN_REQUIRED') { bCopy._section = 'LOGIN_REQUIRED';    loginRequired.push(bCopy); }
+    else if (b.verificationStatus === 'SETUP_NEEDED')   { bCopy._section = 'SETUP_NEEDED';      setupNeeded.push(bCopy); }
+    else                                                { bCopy._section = 'NEEDS_VERIFICATION'; emailFound.push(bCopy); }
   });
 
   // Email alerts
   emailAlerts.forEach(function(a) {
-    if (a.verificationStatus === ALERT_STATUS.VERIFIED_REAL)
-      verifiedReal.push({ ...a, _section: 'VERIFIED_REAL' });
-    else if (a.verificationStatus === ALERT_STATUS.LOGIN_REQUIRED || a.portalLoginNeeded)
-      loginRequired.push({ ...a, _section: 'LOGIN_REQUIRED' });
-    else if (a.verificationStatus === ALERT_STATUS.IGNORED)
-      {} // omit from report
-    else
-      emailFound.push({ ...a, _section: 'EMAIL_ALERTS_FOUND' });
+    var aCopy = Object.assign({}, a);
+    if (a.verificationStatus === ALERT_STATUS.VERIFIED_REAL) {
+      aCopy._section = 'VERIFIED_REAL'; verifiedReal.push(aCopy);
+    } else if (a.verificationStatus === ALERT_STATUS.LOGIN_REQUIRED || a.portalLoginNeeded) {
+      aCopy._section = 'LOGIN_REQUIRED'; loginRequired.push(aCopy);
+    } else if (a.verificationStatus === ALERT_STATUS.IGNORED) {
+      // omit from report
+    } else {
+      aCopy._section = 'EMAIL_ALERTS_FOUND'; emailFound.push(aCopy);
+    }
   });
 
-  // URGENT: Only VERIFIED_REAL with real deadlineDays <= 3 — Phase 13+15 null-safe rule
+  // URGENT: Only VERIFIED_REAL with a real numeric deadlineDays <= 3 -- null-safe
   var urgentVerified = verifiedReal.filter(function(b) {
-    return b.deadlineDays != null && b.deadlineDays <= 3 && !b.isFake;
+    return b.deadlineDays != null && typeof b.deadlineDays === 'number' && b.deadlineDays <= 3 && !b.isFake;
   });
 
   return {
-    A_VERIFIED_REAL: verifiedReal,
+    A_VERIFIED_REAL:    verifiedReal,
     B_EMAIL_ALERTS_FOUND: emailFound,
-    C_LOGIN_REQUIRED: loginRequired,
-    D_SETUP_NEEDED: setupNeeded,
-    E_DO_NOT_ACT: doNotAct,
-    urgentVerified: urgentVerified,
-    // Safety checks
+    C_LOGIN_REQUIRED:   loginRequired,
+    D_SETUP_NEEDED:     setupNeeded,
+    E_DO_NOT_ACT:       doNotAct,
+    urgentVerified:     urgentVerified,
     _noUrgentPlaceholders: doNotAct.every(function(b) { return !b.urgent; }),
-    _noNullDeadlines: verifiedReal.every(function(b) { return b.deadlineDays !== 'null'; }),
+    _noNullDeadlines:   verifiedReal.every(function(b) { return b.deadlineDays !== 'null'; }),
     timestamp: new Date().toISOString()
   };
 }
 
-// ── EXPORTS ───────────────────────────────────────────────────────────────────
+// -- EXPORTS ------------------------------------------------------------------
 
 module.exports = {
-  ALERT_STATUS,
-  SENDER_PATTERNS,
-  KEYWORD_PATTERNS,
-  parseEmailMessage,
-  importEmailMessages,
-  extractDueDate,
-  deadlineDaysFromDate,
-  matchKeywords,
-  extractTitle,
-  extractAgency,
-  extractLink,
-  extractLocation,
-  detectSource,
-  isDuplicate,
-  getAlerts,
-  getAlertById,
-  updateAlertStatus,
-  clearAlerts,
-  getAlertSummary,
-  buildReportSections,
-  needsPortalLogin
+  ALERT_STATUS:               ALERT_STATUS,
+  ALLOWED_STATUS_TRANSITIONS: ALLOWED_STATUS_TRANSITIONS,
+  SENDER_PATTERNS:            SENDER_PATTERNS,
+  KEYWORD_PATTERNS:           KEYWORD_PATTERNS,
+  parseEmailMessage:          parseEmailMessage,
+  importEmailMessages:        importEmailMessages,
+  extractDueDate:             extractDueDate,
+  deadlineDaysFromDate:       deadlineDaysFromDate,
+  matchKeywords:              matchKeywords,
+  extractTitle:               extractTitle,
+  extractAgency:              extractAgency,
+  extractLink:                extractLink,
+  extractLocation:            extractLocation,
+  detectSource:               detectSource,
+  isDuplicate:                isDuplicate,
+  getAlerts:                  getAlerts,
+  getAlertById:               getAlertById,
+  getAlertsByStatus:          getAlertsByStatus,
+  updateAlertStatus:          updateAlertStatus,
+  clearAlerts:                clearAlerts,
+  getAlertSummary:            getAlertSummary,
+  buildReportSections:        buildReportSections,
+  needsPortalLogin:           needsPortalLogin
 };
