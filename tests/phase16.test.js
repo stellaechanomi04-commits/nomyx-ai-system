@@ -96,16 +96,18 @@ function test(name, fn) {
 
 console.log('\n[Phase 16 Tests] Alert Verification + Opportunity Pipeline\n');
 
-// -- 1. Email alerts default to EMAIL_ALERT_FOUND (never auto-VERIFIED_REAL) --
-test('T01: imported alerts default to EMAIL_ALERT_FOUND -- never auto-VERIFIED_REAL', function() {
+// -- 1. Phase 16.1: BidNet alerts auto-promote to NEEDS_LOGIN_VERIFICATION; SBA to PUBLIC_SOURCE_FOUND; never auto-VERIFIED_REAL --
+test('T01: imported alerts never auto-set to VERIFIED_REAL; BidNet->NEEDS_LOGIN_VERIFICATION, SBA->PUBLIC_SOURCE_FOUND', function() {
   assert.ok(emailAlertParser, 'emailAlertParser module loaded');
   var ALERT_STATUS = emailAlertParser.ALERT_STATUS;
   assert.strictEqual(ALERT_STATUS.EMAIL_ALERT_FOUND, 'EMAIL_ALERT_FOUND');
   assert.strictEqual(ALERT_STATUS.VERIFIED_REAL, 'VERIFIED_REAL');
+  assert.ok(ALERT_STATUS.NEEDS_LOGIN_VERIFICATION, 'NEEDS_LOGIN_VERIFICATION status exists');
+  assert.ok(ALERT_STATUS.PUBLIC_SOURCE_FOUND, 'PUBLIC_SOURCE_FOUND status exists');
 
-  // Simulate a parsed alert -- must start at EMAIL_ALERT_FOUND
-  var fakeMsg = {
-    id: 'msg-t01',
+  // BidNet alert must auto-promote to NEEDS_LOGIN_VERIFICATION (requires portal login)
+  var bidnetMsg = {
+    id: 'msg-t01-bidnet',
     payload: {
       headers: [
         { name: 'From', value: 'alerts@bidnetdirect.com' },
@@ -116,13 +118,29 @@ test('T01: imported alerts default to EMAIL_ALERT_FOUND -- never auto-VERIFIED_R
     }
   };
   clearAll();
-  var result = emailAlertParser.parseEmailMessage(fakeMsg);
-  if (result && result.verificationStatus) {
-    assert.strictEqual(result.verificationStatus, 'EMAIL_ALERT_FOUND', 'Alert must start at EMAIL_ALERT_FOUND');
-    assert.notStrictEqual(result.verificationStatus, 'VERIFIED_REAL', 'Must NOT be auto-set to VERIFIED_REAL');
+  var bidnetResult = emailAlertParser.parseEmailMessage(bidnetMsg);
+  if (bidnetResult && bidnetResult.verificationStatus) {
+    assert.notStrictEqual(bidnetResult.verificationStatus, 'VERIFIED_REAL', 'BidNet must NOT be auto-VERIFIED_REAL');
+    assert.strictEqual(bidnetResult.verificationStatus, 'NEEDS_LOGIN_VERIFICATION', 'BidNet must auto-promote to NEEDS_LOGIN_VERIFICATION');
   }
-  // Even if parse fails due to test env, the constant must be correct
-  assert.strictEqual(ALERT_STATUS.EMAIL_ALERT_FOUND, 'EMAIL_ALERT_FOUND');
+
+  // SBA SubNet alert must auto-promote to PUBLIC_SOURCE_FOUND (public portal)
+  var sbaMsg = {
+    id: 'msg-t01-sba',
+    payload: {
+      headers: [
+        { name: 'From', value: 'subnet@sba.gov' },
+        { name: 'Subject', value: 'Last-Mile Delivery Subcontractor NJ' },
+        { name: 'Date', value: 'Sat, 6 Jun 2026 11:00:00 +0000' }
+      ],
+      parts: []
+    }
+  };
+  var sbaResult = emailAlertParser.parseEmailMessage(sbaMsg);
+  if (sbaResult && sbaResult.verificationStatus) {
+    assert.notStrictEqual(sbaResult.verificationStatus, 'VERIFIED_REAL', 'SBA must NOT be auto-VERIFIED_REAL');
+    assert.strictEqual(sbaResult.verificationStatus, 'PUBLIC_SOURCE_FOUND', 'SBA SubNet must auto-promote to PUBLIC_SOURCE_FOUND');
+  }
 });
 
 // -- 2. Duplicates blocked by messageId --
@@ -166,7 +184,9 @@ test('T04: EMAIL_ALERT_FOUND cannot be set directly to VERIFIED_REAL (guard enfo
   var stored = emailAlertParser.getAlerts();
   if (stored.length > 0) {
     var alertInStore = stored[stored.length - 1];
-    assert.strictEqual(alertInStore.verificationStatus, 'EMAIL_ALERT_FOUND');
+    // Phase 16.1: BidNet alerts auto-promote to NEEDS_LOGIN_VERIFICATION — guard still blocks jump to VERIFIED_REAL
+    var validPreVerifyStatuses = ['EMAIL_ALERT_FOUND', 'NEEDS_LOGIN_VERIFICATION', 'PUBLIC_SOURCE_FOUND'];
+    assert.ok(validPreVerifyStatuses.includes(alertInStore.verificationStatus), 'Alert must be in a pre-verified status, got: ' + alertInStore.verificationStatus);
     // Attempt to jump directly to VERIFIED_REAL -- should be blocked
     var updateResult = emailAlertParser.updateAlertStatus(alertInStore.id, 'VERIFIED_REAL');
     // Should return error object or null (blocked)
@@ -367,22 +387,24 @@ test('T15: no Stella Bella identifiers in Phase 16 modules', function() {
   }
 });
 
-// ── FINAL SUMMARY ─────────────────────────────────────────────────────────────
+// ── RESULTS ────────────────────────────────────────────────────────────────────
 
-console.log('\n' + '='.repeat(55));
+console.log('\n=======================================================');
 console.log('Phase 16 Test Results: ' + passed + ' passed, ' + failed + ' failed');
-console.log('='.repeat(55));
+console.log('=======================================================\n');
 
 results.forEach(function(r) {
-  var icon = r.status === 'PASS' ? '[PASS]' : '[FAIL]';
-  console.log(icon + ' ' + r.name);
-  if (r.error) console.log('       ERROR: ' + r.error);
+  if (r.status === 'PASS') {
+    console.log('[PASS] ' + r.name);
+  } else {
+    console.error('[FAIL] ' + r.name + '\n       ERROR: ' + r.error);
+  }
 });
 
 if (failed > 0) {
   console.error('\n' + failed + ' test(s) failed -- fix before deploy');
   process.exit(1);
 } else {
-  console.log('\nAll ' + passed + ' Phase 16 tests passed. Safe to deploy.');
+  console.log('\nAll ' + passed + ' Phase 16 tests passed. Ready to deploy.');
   process.exit(0);
 }

@@ -18,7 +18,8 @@ const PORTAL_STATUS = {
   CAPTCHA_MANUAL: 'CAPTCHA/Manual Required',
   BLOCKED: 'Blocked',
   NOT_CONFIGURED: 'Not Configured',
-  MANUAL_REVIEW: 'Manual Review'
+  MANUAL_REVIEW: 'Manual Review',
+  STALE_REQUEST: 'Stale Request'  // BidNet SSO link expired — use home page to restart
 };
 
 const SOURCE_TYPE = {
@@ -53,7 +54,7 @@ let sessions = {
   bidnetDirect: {
     id: 'bidnetDirect',
     name: 'BidNet Direct',
-    loginUrl: 'https://www.bidnetdirect.com/new-jersey',
+    loginUrl: 'https://www.bidnetdirect.com',  // HOME PAGE ONLY — never use idp.bidnetdirect.com SSO links (they expire and cause Stale Request errors)
     searchUrl: 'https://www.bidnetdirect.com/public/solicitations/search',
     sourceType: SOURCE_TYPE.BROWSER_SESSION,
     accountStatus: 'Registered',
@@ -63,7 +64,8 @@ let sessions = {
     nextScheduledScan: 'Daily 7am (after session active)',
     savedSearchStatus: 'Setup needed — log in to configure saved searches',
     emailAlertStatus: 'Setup needed — log in to enable email alerts for NJ/PA logistics',
-    notes: 'No raw password stored. Stella logs in directly in browser. After login, click Mark Session Active.',
+    staleDetectedAt: null,
+    notes: 'No raw password stored. Stella logs in directly in browser using HOME PAGE only. If you see Stale Request, click Mark Stale and start fresh from https://www.bidnetdirect.com. After login, click Mark Session Active.',
     keywords: ['logistics', 'courier', 'transport', 'delivery', 'freight', 'medical courier', 'specimen'],
     actions: ['Request Stella Approval', 'Open Portal', 'Mark Session Active'],
     priority: 2
@@ -255,6 +257,23 @@ function markScanComplete(id) {
   });
 }
 
+// Phase 16.1: Stale request detection for BidNet SSO links
+function markStaleDetected(id) {
+  if (!sessions[id]) return { error: 'Portal not found: ' + id };
+  return updateSessionStatus(id, {
+    sessionStatus: PORTAL_STATUS.STALE_REQUEST,
+    staleDetectedAt: new Date().toISOString()
+  });
+}
+
+function clearStaleStatus(id) {
+  if (!sessions[id]) return { error: 'Portal not found: ' + id };
+  return updateSessionStatus(id, {
+    sessionStatus: PORTAL_STATUS.LOGIN_REQUIRED,
+    staleDetectedAt: null
+  });
+}
+
 function getPortalsNeedingLogin() {
   return Object.values(sessions).filter(function(s) {
     return s.sessionStatus === PORTAL_STATUS.LOGIN_REQUIRED ||
@@ -272,7 +291,6 @@ function getActiveSessions() {
 function getSummary() {
   var all = getAllSessions();
   return {
-    total: all.length,
     active: all.filter(function(s) { return s.sessionStatus === PORTAL_STATUS.ACTIVE; }).length,
     needsLogin: all.filter(function(s) {
       return s.sessionStatus === PORTAL_STATUS.LOGIN_REQUIRED ||
@@ -294,6 +312,8 @@ module.exports = {
   markSessionActive,
   markLoginRequired,
   markScanComplete,
+  markStaleDetected,
+  clearStaleStatus,
   getPortalsNeedingLogin,
   getActiveSessions,
   getSummary

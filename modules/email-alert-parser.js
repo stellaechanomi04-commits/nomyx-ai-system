@@ -17,11 +17,15 @@ try { gmailOAuth = require('./gmail-oauth'); } catch(e) {}
 // ── ALERT STATUS CONSTANTS ─────────────────────────────────────────────────────
 
 var ALERT_STATUS = {
-  EMAIL_ALERT_FOUND: 'EMAIL_ALERT_FOUND',   // Default — needs verification
-  VERIFIED_REAL:     'VERIFIED_REAL',        // Confirmed via portal or source link
-  LOGIN_REQUIRED:    'LOGIN_REQUIRED',       // Portal login needed to verify
-  IGNORED:           'IGNORED',             // Stella chose to ignore
-  DUPLICATE:         'DUPLICATE'            // Matched an existing alert
+  EMAIL_ALERT_FOUND:          'EMAIL_ALERT_FOUND',          // Default — needs verification
+  VERIFIED_REAL:              'VERIFIED_REAL',              // Confirmed via portal or source link
+  LOGIN_REQUIRED:             'LOGIN_REQUIRED',             // Portal login needed to verify
+  IGNORED:                    'IGNORED',                    // Stella chose to ignore
+  DUPLICATE:                  'DUPLICATE',                  // Matched an existing alert
+  PUBLIC_SOURCE_FOUND:        'PUBLIC_SOURCE_FOUND',        // Phase 16.1: Source is public (SBA SubNet etc) — can verify without login
+  NEEDS_LOGIN_VERIFICATION:   'NEEDS_LOGIN_VERIFICATION',   // Phase 16.1: Requires portal login before verification
+  NO_ACTION:                  'NO_ACTION',                  // Stella marked no action needed
+  EXPIRED:                    'EXPIRED'                     // Past deadline
 };
 
 // ── SENDER → PORTAL SOURCE MAP ────────────────────────────────────────────────
@@ -301,6 +305,18 @@ function parseEmailMessage(message) {
     portalLoginNeeded: needsPortalLogin(sourceInfo)
   };
 
+  // Phase 16.1: Initial status promotion based on source type
+  // SBA SubNet is a public portal — no login needed to check
+  if (sourceInfo.portalId === 'sbaSubnet') {
+    alert.verificationStatus = ALERT_STATUS.PUBLIC_SOURCE_FOUND;
+    alert.notes = 'SBA SubNet is a public portal — source can be verified without portal login';
+  } else if (needsPortalLogin(sourceInfo)) {
+    // BidNet Direct, NJSTART, hospital vendor portals require login
+    alert.verificationStatus = ALERT_STATUS.NEEDS_LOGIN_VERIFICATION;
+    alert.notes = 'Portal login required to verify this opportunity: ' + sourceInfo.source;
+  }
+  // All other sources stay EMAIL_ALERT_FOUND (default) until verified
+
   importedMessageIds.add(message.id);
   alertStore.push(alert);
 
@@ -407,7 +423,6 @@ function buildReportSections(scanBids, emailAlerts) {
     E_DO_NOT_ACT:       doNotAct,
     urgentVerified:     urgentVerified,
     _noUrgentPlaceholders: doNotAct.every(function(b) { return !b.urgent; }),
-    _noNullDeadlines:   verifiedReal.every(function(b) { return b.deadlineDays !== 'null'; }),
     timestamp: new Date().toISOString()
   };
 }

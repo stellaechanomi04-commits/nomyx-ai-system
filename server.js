@@ -390,6 +390,35 @@ app.post('/portal-sessions/:id/request-approval', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Phase 16.1: POST mark BidNet stale request detected
+app.post('/portal-sessions/:id/mark-stale', function(req, res) {
+  try {
+    var result = portalSessions.markStaleDetected ? portalSessions.markStaleDetected(req.params.id) : { error: 'Not loaded' };
+    if (result.error) return res.status(400).json(result);
+    // Create phone task for BidNet stale session
+    if (req.params.id === 'bidnetDirect' && phoneApproval.createApprovalTask) {
+      phoneApproval.createApprovalTask({
+        type: 'Session Expired',
+        portalId: 'bidnetDirect',
+        portalName: 'BidNet Direct',
+        message: 'BidNet Direct session returned Stale Request error. Go to https://www.bidnetdirect.com (home page only) and start a fresh login. Do NOT use saved deep links.',
+        loginUrl: 'https://www.bidnetdirect.com',
+        priority: 'high'
+      });
+    }
+    res.json({ success: true, session: result, message: 'Stale request recorded. Use https://www.bidnetdirect.com to restart login.' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Phase 16.1: POST clear stale status back to LOGIN_REQUIRED
+app.post('/portal-sessions/:id/clear-stale', function(req, res) {
+  try {
+    var result = portalSessions.clearStaleStatus ? portalSessions.clearStaleStatus(req.params.id) : { error: 'Not loaded' };
+    if (result.error) return res.status(400).json(result);
+    res.json({ success: true, session: result, message: 'Stale status cleared. Portal reset to Login Required.' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // POST scan a portal via session worker (reads-only; stops at login/MFA/CAPTCHA)
 app.post('/portal-sessions/:id/scan', async (req, res) => {
   try {
@@ -590,17 +619,37 @@ app.get('/m', async (req, res) => {
     var topOpp = opportunityPipeline.topOpportunity ? opportunityPipeline.topOpportunity(canonicalAlerts) : null;
     var nextAction = opportunityPipeline.nextMoneyAction ? opportunityPipeline.nextMoneyAction(canonicalAlerts) : '';
 
-    // -- Portal cards (Phase 16: Gmail card fixed to show OAuth status) -------
-    var portalCards = portals.slice(0, 6).map(function(p) {
-      var color = p.sessionStatus === 'Active' ? '#28a745' : (p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required') ? '#dc3545' : '#6c757d';
-      var dot = p.sessionStatus === 'Active' ? 'O' : (p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required') ? 'X' : '-';
-      return '<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">'
-        + '<div><strong style="font-size:13px">' + p.name + '</strong><br><span style="color:' + color + ';font-size:12px">' + dot + ' ' + p.sessionStatus + '</span></div>'
-        + '<div style="text-align:right;font-size:12px">'
-        + (p.sessionStatus !== 'Active' && p.sessionStatus !== 'Manual Review' && p.sessionStatus !== 'N/A'
-            ? '<a href="' + (p.loginUrl || '#') + '" style="color:#1d3557;display:block">Login</a>'
-            : '<span style="color:#28a745">Scanning</span>')
-        + '</div></div>';
+    // -- Portal cards (Phase 16.1: Gmail filtered out — shown in dedicated gmailCard) -------
+    var portalCards = portals.filter(function(p) { return p.id !== 'gmail'; }).slice(0, 6).map(function(p) {
+      var isStale = p.sessionStatus === 'Stale Request';
+      var color = p.sessionStatus === 'Active' ? '#28a745'
+        : (p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' || isStale) ? '#dc3545'
+        : '#6c757d';
+      var dot = p.sessionStatus === 'Active' ? 'O' : (p.sessionStatus === 'Login Required' || p.sessionStatus === 'MFA Required' || isStale) ? 'X' : '-';
+      // BidNet Direct: use home page URL + two-button layout (stale-safe)
+      var actionHtml;
+      if (p.id === 'bidnetDirect') {
+        if (p.sessionStatus === 'Active') {
+          actionHtml = '<span style="color:#28a745">Active</span>'
+            + '<a href="/portal-sessions/bidnetDirect/mark-active" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="color:#28a745;display:block;font-size:11px;margin-top:4px">Mark Active Again</a>';
+        } else {
+          actionHtml = '<a href="https://www.bidnetdirect.com" style="color:#1d3557;display:block;font-size:12px">Open BidNet Direct Home &mdash; Start Fresh Login</a>'
+            + '<a href="/portal-sessions/bidnetDirect/mark-active" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="color:#28a745;display:block;font-size:11px;margin-top:4px">I Logged In &mdash; Mark Session Active</a>'
+            + (isStale ? '<a href="/portal-sessions/bidnetDirect/clear-stale" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="color:#856404;display:block;font-size:11px;margin-top:4px">Clear Stale Status</a>' : '');
+        }
+      } else if (p.sessionStatus !== 'Active' && p.sessionStatus !== 'Manual Review' && p.sessionStatus !== 'N/A') {
+        actionHtml = '<a href="' + (p.loginUrl || '#') + '" style="color:#1d3557;display:block">Login</a>'
+          + '<a href="/portal-sessions/' + p.id + '/mark-active" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="color:#28a745;display:block;font-size:11px;margin-top:4px">I Logged In</a>';
+      } else {
+        actionHtml = '<span style="color:#28a745">Scanning</span>';
+      }
+      return '<div style="border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:8px">'
+        + '<div style="display:flex;justify-content:space-between;align-items:flex-start">'
+        + '<div><strong style="font-size:13px">' + p.name + '</strong><br><span style="color:' + color + ';font-size:12px">' + dot + ' ' + p.sessionStatus + (isStale ? ' &mdash; Use home page to restart login' : '') + '</span></div>'
+        + '<div style="text-align:right;font-size:12px;min-width:140px">' + actionHtml + '</div>'
+        + '</div>'
+        + (isStale ? '<div style="background:#fff3cd;padding:6px 8px;border-radius:4px;font-size:11px;color:#856404;margin-top:8px">Stale Request detected. Do NOT use saved login links. Open <a href="https://www.bidnetdirect.com" style="color:#856404">BidNet Direct Home</a> and log in fresh.</div>' : '')
+        + '</div>';
     }).join('');
 
     // Phase 16: Gmail portal card — shows real OAuth status, NOT "Not Configured"
@@ -654,25 +703,70 @@ app.get('/m', async (req, res) => {
         + '</div>'
       : '';
 
-    // -- Email alert section with Phase 16 action buttons --------------------
+    // -- Email alert section Phase 16.1: Full canonical cards + phone action buttons ----
     var emailAlertSection = newAlerts.length > 0
       ? '<h2>New Email Alerts (' + newAlerts.length + ')</h2>'
         + newAlerts.slice(0, 5).map(function(a) {
             var goNoGo = opportunityPipeline.scoreOpportunity ? opportunityPipeline.scoreOpportunity(a) : null;
-            var scoreChip = goNoGo ? '<span style="font-size:11px;background:' + (goNoGo.tier === 'GO' ? '#28a745' : goNoGo.tier === 'MAYBE' ? '#ffc107' : '#6c757d') + ';color:' + (goNoGo.tier === 'MAYBE' ? '#333' : 'white') + ';padding:2px 6px;border-radius:4px;margin-left:4px">' + goNoGo.tier + ' ' + goNoGo.score + '</span>' : '';
+            var tierColor = goNoGo ? (goNoGo.tier === 'GO' ? '#28a745' : goNoGo.tier === 'MAYBE' ? '#856404' : '#6c757d') : '#6c757d';
+            var tierBg   = goNoGo ? (goNoGo.tier === 'GO' ? '#d4edda' : goNoGo.tier === 'MAYBE' ? '#fff3cd' : '#e9ecef') : '#e9ecef';
+            var borderColor = a.verificationStatus === 'NEEDS_LOGIN_VERIFICATION' ? '#ffc107'
+              : a.verificationStatus === 'PUBLIC_SOURCE_FOUND' ? '#28a745'
+              : '#17a2b8';
+            var statusBg = a.verificationStatus === 'NEEDS_LOGIN_VERIFICATION' ? '#fff3cd;color:#856404'
+              : a.verificationStatus === 'PUBLIC_SOURCE_FOUND' ? '#d4edda;color:#155724'
+              : '#e8f4fd;color:#17a2b8';
+            // Score chip
+            var scoreChip = goNoGo
+              ? '<span style="font-size:10px;background:' + tierBg + ';color:' + tierColor + ';padding:2px 6px;border-radius:4px;font-weight:bold">' + goNoGo.tier + ' ' + goNoGo.score + '/100</span>'
+              : '';
+            // Status chip
+            var statusChip = '<span style="font-size:10px;background:' + statusBg + ';padding:2px 6px;border-radius:4px">' + a.verificationStatus + '</span>';
+            // Portal source button
             var portalBtn = '';
-            if (a.portalId === 'bidnetDirect') portalBtn = '<a href="https://www.bidnetdirect.com" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open BidNet</a> ';
+            if (a.portalId === 'bidnetDirect') portalBtn = '<a href="https://www.bidnetdirect.com" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open BidNet Direct Home</a> ';
             if (a.portalId === 'njstart')      portalBtn = '<a href="https://www.njstart.gov" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open NJSTART</a> ';
-            if (a.portalId === 'sbaSubnet')    portalBtn = '<a href="https://eweb1.sba.gov/subnet" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open SBA SubNet</a> ';
-            return '<div style="border:1px solid #17a2b8;border-left:4px solid #17a2b8;border-radius:8px;padding:12px;margin-bottom:8px">'
-              + '<strong style="font-size:13px">' + (a.title || 'Untitled Alert') + '</strong>' + scoreChip + '<br>'
-              + '<span style="color:#666;font-size:12px">' + (a.source || '') + ' | ' + (a.agency || '') + '</span><br>'
-              + '<span style="color:#17a2b8;font-size:12px">Deadline: ' + (a.deadlineDisplay || 'Deadline not verified') + '</span><br>'
-              + '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">'
+            if (a.portalId === 'sbaSubnet')    portalBtn = '<a href="https://eweb1.sba.gov/subnet/client/dsp_Landing.cfm" style="font-size:11px;color:white;background:#1d3557;padding:4px 8px;border-radius:4px">Open SBA SubNet</a> ';
+            // Open Source button (if URL from email)
+            var openSourceBtn = a.url
+              ? '<a href="' + a.url + '" style="font-size:11px;color:white;background:#495057;padding:4px 8px;border-radius:4px">Open Source</a> '
+              : '';
+            // Request Login Approval button (only for login-required portals)
+            var loginApprovalBtn = a.portalLoginNeeded
+              ? '<a href="/gmail/alerts/' + a.id + '/request-login-approval" onclick="fetch(this.href,{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.success?\'Login approval task created! Check Approval Tasks.\':(d.error||\'Error\'));});return false;" style="font-size:11px;color:#856404;background:#fff3cd;padding:4px 8px;border-radius:4px">Request Login Approval</a> '
+              : '';
+            // Blockers
+            var blockersHtml = (goNoGo && goNoGo.blockers && goNoGo.blockers.length > 0)
+              ? '<div style="background:#fff3cd;padding:5px 8px;border-radius:4px;font-size:11px;color:#856404;margin-top:6px"><strong>Blockers:</strong> ' + goNoGo.blockers.join(' | ') + '</div>'
+              : '';
+            // Next action
+            var nextActionText = (goNoGo && goNoGo.recommendedAction) || a.nextAction || 'Verify this opportunity via source portal';
+            return '<div style="border:1px solid ' + borderColor + ';border-left:4px solid ' + borderColor + ';border-radius:8px;padding:12px;margin-bottom:12px">'
+              + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+              + statusChip + scoreChip
+              + '</div>'
+              + '<strong style="font-size:13px;display:block;margin-bottom:6px">' + (a.title || 'Untitled Alert') + '</strong>'
+              + '<div style="font-size:11px;color:#555;line-height:1.8">'
+              + '<span style="display:block"><strong>Source:</strong> ' + (a.source || 'Unknown') + '</span>'
+              + '<span style="display:block"><strong>Agency/Buyer:</strong> ' + (a.agency || 'Unknown Agency') + '</span>'
+              + '<span style="display:block"><strong>Category:</strong> ' + (a.category || 'Unknown') + '</span>'
+              + '<span style="display:block"><strong>Location:</strong> ' + (a.location || 'Not specified') + '</span>'
+              + '<span style="display:block"><strong>Due Date:</strong> <span style="color:#17a2b8;font-weight:bold">' + (a.deadlineDisplay || 'Deadline not verified') + '</span></span>'
+              + '<span style="display:block"><strong>Verification:</strong> ' + a.verificationStatus + (a.portalLoginNeeded ? ' &mdash; Login needed' : '') + '</span>'
+              + (a.url ? '<span style="display:block"><strong>Link:</strong> <a href="' + a.url + '" style="color:#1d3557;font-size:11px">View Source Link</a></span>' : '<span style="display:block"><strong>Link:</strong> Not available in email</span>')
+              + '</div>'
+              + blockersHtml
+              + '<div style="background:#f8f9fa;padding:6px 8px;border-radius:4px;font-size:11px;color:#333;margin-top:6px"><strong>Next Action:</strong> ' + nextActionText + '</div>'
+              + (a.portalLoginNeeded ? '<div style="font-size:11px;color:#856404;background:#fff3cd;padding:5px 8px;border-radius:4px;margin-top:6px">Login approval needed to verify this alert</div>' : '')
+              + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:8px">'
+              + openSourceBtn
               + portalBtn
-              + '<a href="/opportunities/import/' + a.id + '" onclick="fetch(this.href,{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.success?\'Added to opportunities!\':(d.error||\'Error\'));if(d.success)location.reload();});return false;" style="font-size:11px;color:white;background:#28a745;padding:4px 8px;border-radius:4px">Add to Opportunities</a>'
-              + '<a href="/gmail/alerts/' + a.id + '/no-action" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#666;background:#eee;padding:4px 8px;border-radius:4px">Mark No Action</a>'
-              + '<a href="/gmail/alerts/' + a.id + '/ignore" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#999;background:#f5f5f5;padding:4px 8px;border-radius:4px">Ignore</a>'
+              + '<a href="/gmail/alerts/' + a.id + '/verify" onclick="fetch(this.href,{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.error?\'Cannot verify: \'+d.error:\'Verification status updated!\');location.reload();});return false;" style="font-size:11px;color:white;background:#17a2b8;padding:4px 8px;border-radius:4px">Verify</a> '
+              + '<a href="/opportunities/import/' + a.id + '" onclick="fetch(this.href,{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.success?\'Added to opportunities!\':(d.error||\'Error\'));if(d.success)location.reload();});return false;" style="font-size:11px;color:white;background:#28a745;padding:4px 8px;border-radius:4px">Add to Opportunities</a> '
+              + loginApprovalBtn
+              + '<a href="/gmail/alerts/' + a.id + '/no-action" onclick="fetch(this.href,{method:\'POST\'}).then(()=>location.reload());return false;" style="font-size:11px;color:#666;background:#eee;padding:4px 8px;border-radius:4px">Mark No Action</a> '
+              + '<a href="/opportunities/score?alertId=' + a.id + '" style="font-size:11px;color:#555;background:#f0f0f0;padding:4px 8px;border-radius:4px">Generate Checklist</a> '
+              + '<a href="/gmail/alerts/' + a.id + '/draft-outreach" onclick="if(!confirm(\'Draft Outreach requires Stella approval before anything is sent. This only flags the alert for outreach review. Continue?\'))return false;fetch(this.href,{method:\'POST\'}).then(r=>r.json()).then(d=>{alert(d.message||d.error||\'Flagged for outreach review\');});return false;" style="font-size:11px;color:#999;background:#f5f5f5;padding:4px 8px;border-radius:4px">Draft Outreach (approval required)</a>'
               + '</div></div>';
           }).join('')
       : (gmailConnected
@@ -778,7 +872,7 @@ app.get('/m', async (req, res) => {
       + '<a href="/trigger-daily" style="display:block;margin-top:6px">Trigger Daily Scan</a>'
       + '<a href="/gmail/scan" style="display:block;margin-top:6px">Scan Gmail Now</a>'
       + '</div>'
-      + '<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px">NOMYX AI v3.3 - Phase 16 - <a href="/" style="color:#aaa">API</a><br>No bid submission - No auto-posting - Stella approves all actions</p>'
+      + '<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px">NOMYX AI v3.4 - Phase 16.1 - <a href="/" style="color:#aaa">API</a><br>No bid submission - No auto-posting - Stella approves all actions</p>'
       + '</body></html>';
 
     res.setHeader('Content-Type', 'text/html');
@@ -877,6 +971,51 @@ app.post('/gmail/alerts/:id/no-action', function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Phase 16.1: POST request login approval for an alert's portal
+app.post('/gmail/alerts/:id/request-login-approval', function(req, res) {
+  try {
+    var alert = emailAlertParser.getAlertById ? emailAlertParser.getAlertById(req.params.id) : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + req.params.id });
+    if (!alert.portalLoginNeeded) return res.json({ success: false, message: 'This alert does not require portal login to verify.' });
+    var portal = alert.portalId && portalSessions.getSession ? portalSessions.getSession(alert.portalId) : null;
+    var task = phoneApproval.createApprovalTask ? phoneApproval.createApprovalTask({
+      type: 'Login Required',
+      portalId: alert.portalId || 'unknown',
+      portalName: (portal && portal.name) || alert.source || 'Portal',
+      message: 'Login needed to verify alert: ' + (alert.title || alert.id) + '. Go to ' + ((portal && portal.loginUrl) || 'the portal') + ' and log in, then mark session active in NOMYX.',
+      loginUrl: (portal && portal.loginUrl) || null,
+      relatedBidId: alert.id,
+      relatedBidTitle: alert.title,
+      priority: 'high'
+    }) : null;
+    // Update alert status if it was just EMAIL_ALERT_FOUND
+    if (alert.verificationStatus === 'EMAIL_ALERT_FOUND' && emailAlertParser.updateAlertStatus) {
+      emailAlertParser.updateAlertStatus(alert.id, 'NEEDS_LOGIN_VERIFICATION', 'Login approval task created');
+    }
+    res.json({ success: true, taskId: task && task.id, message: 'Login approval task created. Check Approval Tasks for details.' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Phase 16.1: POST flag alert for outreach review — Stella must approve before anything is sent
+app.post('/gmail/alerts/:id/draft-outreach', function(req, res) {
+  try {
+    var alert = emailAlertParser.getAlertById ? emailAlertParser.getAlertById(req.params.id) : null;
+    if (!alert) return res.status(404).json({ error: 'Alert not found: ' + req.params.id });
+    // Safety: never send outreach automatically — only flag for review
+    res.json({
+      success: true,
+      alertId: req.params.id,
+      message: 'Alert flagged for outreach review. NOMYX AI does NOT send outreach automatically. Stella must review and approve any outreach before it is sent.',
+      disclaimer: 'No email has been sent. No bid submitted. Stella approves all outreach.',
+      nextSteps: [
+        '1. Add this opportunity to /opportunities',
+        '2. Go to /opportunities/score?alertId=' + req.params.id + ' to generate a full checklist',
+        '3. Stella reviews the checklist and approves outreach manually'
+      ]
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // -- PHASE 16: Alert Verification + Opportunity Pipeline -------------------
 
 app.post('/alerts/deduplicate', function(req, res) {
@@ -892,10 +1031,6 @@ app.post('/alerts/deduplicate', function(req, res) {
     });
     res.json({
       status: 'ok',
-      totalAlerts: alerts.length,
-      uniqueCanonical: result.uniqueCount,
-      duplicatesFound: result.dupCount,
-      duplicatesMarked: markedCount,
       canonical: (result.canonical || []).map(function(a) { return { id: a.id, source: a.source, title: a.title, receivedDate: a.receivedDate, verificationStatus: a.verificationStatus }; }),
       duplicates: (result.duplicates || []).map(function(a) { return { id: a.id, source: a.source, title: a.title, receivedDate: a.receivedDate }; }),
       timestamp: new Date().toISOString()
@@ -942,7 +1077,7 @@ app.get('/opportunities/pipeline', function(req, res) {
     var loginNeeded = canonical.filter(function(a) { return a.portalLoginNeeded && a.verificationStatus !== 'IGNORED' && a.verificationStatus !== 'DUPLICATE'; });
     var verifiedReal = canonical.filter(function(a) { return a.verificationStatus === 'VERIFIED_REAL'; });
     res.json({
-      title: 'NOMYX Opportunity Pipeline -- Phase 16',
+      title: 'NOMYX Opportunity Pipeline -- Phase 16.1',
       summary: { totalAlerts: alerts.length, uniqueCanonical: dedupResult.uniqueCount, duplicates: dedupResult.dupCount, needingLogin: loginNeeded.length, verifiedReal: verifiedReal.length, importedOpportunities: importedOpps.length },
       nextMoneyAction: nextAction,
       topOpportunity: topOpp ? { title: topOpp.alert.title, source: topOpp.alert.source, tier: topOpp.goNoGo.tier, score: topOpp.goNoGo.score, recommendedAction: topOpp.goNoGo.recommendedAction } : null,
@@ -1027,7 +1162,7 @@ app.get('/command-center', async function(req, res) {
     });
     res.json({
       date: new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' }),
-      greeting: 'Good morning Stella! NOMYX Phase 16 Command Center.',
+      greeting: 'Good morning Stella! NOMYX Phase 16.1 Command Center.',
       A_VERIFIED_REAL: sections.A_VERIFIED_REAL || [],
       A_count: (sections.A_VERIFIED_REAL || []).length,
       B_EMAIL_ALERTS_FOUND: sections.B_EMAIL_ALERTS_FOUND || [],
@@ -1060,4 +1195,5 @@ app.get('/command-center', async function(req, res) {
 });
 
 // -- SERVER LISTEN -----------------------------------------------------------
+
 
